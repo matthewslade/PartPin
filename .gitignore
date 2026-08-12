@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+dist/
+.venv*/
+*.blend1
+.DS_Store

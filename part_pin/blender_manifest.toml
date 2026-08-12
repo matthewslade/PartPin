@@ -1,0 +1,17 @@
+schema_version = "1.0.0"
+
+id = "part_pin"
+version = "1.0.0"
+name = "PartPin"
+tagline = "Split models into printable parts with pin connectors"
+maintainer = "PartPin contributors"
+type = "add-on"
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:MIT"]
+
+tags = ["3D View", "Object", "Import-Export"]
+
+[permissions]
+files = "Export part files (STL/OBJ/FBX) to the folder you choose"
