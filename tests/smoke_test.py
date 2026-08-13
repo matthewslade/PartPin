@@ -1229,12 +1229,14 @@ def scenario_probe_finds_trouble(core):
     bad, suggested, summary = surface.probe_summary(probes, cut)
     check("a fin crossing the cut is flagged", len(bad) >= 3,
           f"{len(bad)} flagged: {summary}")
-    check("the flags say material carries on past the line",
-          any(p['status'] in (surface.PROBE_MARGIN, surface.PROBE_STUCK)
-              for p in bad), str({p['status'] for p in bad}))
-    check("a bigger reach is suggested",
-          suggested is not None and suggested > cut.pp_margin,
-          f"{suggested} vs {cut.pp_margin}")
+    check("the flags say material crosses the line",
+          any(p['status'] == surface.PROBE_BRIDGE for p in bad),
+          str({p['status'] for p in bad}))
+    check("no reach is suggested — reaching further cannot fix a crossing",
+          suggested is None, str(suggested))
+    reason = surface.failure_reason(probes, cut)
+    check("the failure reason points at the crossing material",
+          "outside the line" in reason, reason)
     check("every flag carries a position to draw",
           all(len(p['position']) == 3 for p in bad))
     # Flags must sit on the fin, which is the actual obstruction.
@@ -1244,11 +1246,128 @@ def scenario_probe_finds_trouble(core):
           f"{len(on_fin)} of {len(bad)} above z=0.3")
 
 
-def scenario_welded_material_is_taken(core):
-    """A fin welded across the line is part of the piece being cut, so it is
-    cut through — the cut takes the material continuous with the region
-    inside the line, and needs no widening of Edge Margin to do it."""
-    print("Scenario: material welded across the line is cut through")
+def make_shoulder_arm(core):
+    """A body with an arm rising out of its shoulder, welded on. A collar
+    drawn round the arm under the armpit has a plane that carries on down
+    through the body — the shape from issue #3."""
+    import bmesh as bm_mod
+    from mathutils import Matrix
+
+    bm = bm_mod.new()
+    bm_mod.ops.create_cube(bm, size=1.0)
+    bm.transform(Matrix.LocRotScale(Vector((0, 0, 0)), None,
+                                    Vector((1.6, 1.2, 3.0))))
+    mesh = bpy.data.meshes.new("Body")
+    bm.to_mesh(mesh)
+    bm.free()
+    body = link(bpy.data.objects.new("Body", mesh))
+
+    axis = Vector((0.6, 0.0, 0.8)).normalized()
+    base = Vector((0.5, 0.0, 0.8))
+    bm = bm_mod.new()
+    bm_mod.ops.create_cone(bm, cap_ends=True, cap_tris=False, segments=32,
+                           radius1=0.38, radius2=0.38, depth=3.0)
+    bm_mod.ops.rotate(bm, verts=bm.verts, cent=(0, 0, 0),
+                      matrix=Vector((0, 0, 1)).rotation_difference(
+                          axis).to_matrix())
+    for v in bm.verts:
+        v.co += base + axis * 1.2
+    arm_mesh = bpy.data.meshes.new("arm")
+    bm.to_mesh(arm_mesh)
+    bm.free()
+    arm = link(bpy.data.objects.new("arm", arm_mesh))
+
+    mod = body.modifiers.new("u", 'BOOLEAN')
+    mod.object, mod.operation, mod.solver = arm, 'UNION', 'EXACT'
+    dg = bpy.context.evaluated_depsgraph_get()
+    body.data = bpy.data.meshes.new_from_object(body.evaluated_get(dg))
+    body.modifiers.clear()
+    bpy.data.objects.remove(arm)
+    bpy.context.view_layer.update()
+    return body, base, axis
+
+
+def collar_stroke(surface_mod, model, centre, axis, count=90):
+    """A collar drawn round a limb: rays fired inward at its axis, which is
+    what drawing round it in the viewport produces."""
+    across = axis.cross(Vector((0, 1, 0))).normalized()
+    other = axis.cross(across).normalized()
+    obj = surface_mod.evaluated(model)
+    inverse = obj.matrix_world.inverted()
+    points = []
+    for i in range(count):
+        angle = 2.0 * math.pi * i / count
+        radial = (math.cos(angle) * across
+                  + math.sin(angle) * other).normalized()
+        hit, location, _n, _i = obj.ray_cast(
+            inverse @ (centre + radial * 4.0),
+            inverse.to_3x3() @ (-radial))
+        if hit:
+            points.append(obj.matrix_world @ location)
+    return points
+
+
+def scenario_arm_at_shoulder(core):
+    """Issue #3: a collar under the armpit sliced the whole model down the
+    cut plane instead of taking the arm off."""
+    print("Scenario: collar under the armpit takes the arm only (issue #3)")
+    reset_scene()
+    from part_pin import surface
+    s = bpy.context.scene.part_pin
+    model, base, axis = make_shoulder_arm(core)
+    s.target = model
+    before = volume(model)
+
+    stroke = collar_stroke(surface, model, base + axis * 0.55, axis)
+    cut, error = surface.cut_from_stroke(bpy.context, model, stroke,
+                                        per_loop=18)
+    check("the drawn collar becomes a cut", cut is not None, str(error))
+    if cut is None:
+        return
+
+    # The cut's plane genuinely carries on into the body: that is what used
+    # to get sliced.
+    patch = surface.patch_grid(cut, model, s.surface_resolution)
+    material = sum(map(sum, patch['material']))
+    kept = sum(1 for i in range(patch['n']) for j in range(patch['n'])
+               if patch['material'][i][j] and patch['interior'][i][j])
+    check("the cut only claims material inside the line", kept <= material,
+          f"{kept} of {material} cells")
+
+    failures = []
+    parts, _applied, _warns = core.create_parts(
+        bpy.context, model, [cut], keep_original=True, failures=failures)
+    check("exactly two parts", len(parts) == 2, f"got {len(parts)}: {failures}")
+    for p in parts:
+        check(f"part closed: {p.name}", is_closed(core, p))
+    if len(parts) != 2:
+        return
+    check("volume is conserved",
+          abs(sum(volume(p) for p in parts) - before) < before * 0.01,
+          f"{sum(volume(p) for p in parts):.3f} vs {before:.3f}")
+
+    arm = min(parts, key=volume)
+    body = max(parts, key=volume)
+    check("the arm is the small part", volume(arm) < before * 0.25,
+          f"arm is {volume(arm) / before:.0%} of the model")
+    lo, hi = core.world_bbox(body)
+    check("the body was NOT sliced down the cut plane",
+          (hi.z - lo.z) > 2.9 and (hi.y - lo.y) > 1.1,
+          f"body spans z {hi.z - lo.z:.2f} (of 3.0), y {hi.y - lo.y:.2f} "
+          "(of 1.2)")
+    check("the body keeps nearly all its volume",
+          volume(body) > before * 0.8,
+          f"body is {volume(body) / before:.0%} of the model")
+    arm_lo, _arm_hi = core.world_bbox(arm)
+    check("the arm part starts at the collar, not inside the body",
+          arm_lo.z > 0.5, f"arm starts at z {arm_lo.z:.2f}")
+
+
+def scenario_material_across_line_blocks(core):
+    """A fin crossing the line joins the piece to the model outside the line.
+    Freeing it would mean cutting outside the line, which is the one thing
+    this mode promises not to do (issue #3) — so it reports instead."""
+    print("Scenario: material crossing the line blocks the cut, and is kept")
     reset_scene()
     from part_pin import surface
     s = bpy.context.scene.part_pin
@@ -1261,26 +1380,19 @@ def scenario_welded_material_is_taken(core):
     failures = []
     parts, _applied, _warns = core.create_parts(
         bpy.context, model, [cut], keep_original=True, failures=failures)
-    check("the welded fin does not stop the cut", len(parts) == 2,
-          f"got {len(parts)}: {failures}")
+    check("the model is left whole rather than wrongly cut", len(parts) == 1,
+          f"got {len(parts)}")
+    check("the reason is reported", len(failures) == 1, str(failures))
+    check("the reason names material outside the line",
+          failures and "outside the line" in failures[0], str(failures))
+    check("it says what to do about it",
+          failures and "take the line around it" in failures[0],
+          str(failures))
     check("Edge Margin was not silently widened", cut.pp_margin == started_at,
           f"{started_at} → {cut.pp_margin}")
-    for p in parts:
-        check(f"part closed: {p.name}", is_closed(core, p))
-    if len(parts) != 2:
-        return
-    check("volume is conserved", abs(sum(volume(p) for p in parts) - before)
-          < before * 0.01,
-          f"{sum(volume(p) for p in parts):.3f} vs {before:.3f}")
-    check("no stray chip came off", min(volume(p) for p in parts)
-          > before * 0.02,
-          f"{[round(volume(p), 4) for p in parts]}")
-    # The fin is welded to the end being removed, so it leaves with it.
-    tip = min(parts, key=lambda p: core.world_bbox(p)[0].x
-              if core.world_bbox(p)[0].x > 1.0 else 1e9)
-    lo, hi = core.world_bbox(max(parts, key=volume))
-    check("the cut ran through the fin", hi.z > 0.9 or tip is not None,
-          f"body reaches z {hi.z:.2f}")
+    check("nothing was shaved off the model",
+          abs(volume(parts[0]) - before) < before * 0.01,
+          f"{volume(parts[0]):.4f} vs {before:.4f}")
 
 
 def scenario_overhang_outside_line_survives(core):
@@ -1343,14 +1455,24 @@ def scenario_check_operator(core):
     check("checking alone changes nothing", cut.pp_margin == before,
           f"{before} → {cut.pp_margin}")
     bpy.ops.partpin.check_cut_line(fix=True)
-    check("Fix Margin raises Edge Margin", cut.pp_margin > before,
-          f"{before} → {cut.pp_margin}")
+    check("it does not widen the reach when that cannot help",
+          cut.pp_margin == before, f"{before} → {cut.pp_margin}")
 
+    # On a clean line it reports that all is well and still changes nothing.
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    clean = make_limb(core)
+    s.target = clean
+    cut = collar_cut(core, surface, clean)
+    bpy.context.view_layer.objects.active = cut
+    was = cut.pp_margin
+    bpy.ops.partpin.check_cut_line(fix=True)
+    check("a clean line is left alone", cut.pp_margin == was,
+          f"{was} → {cut.pp_margin}")
     failures = []
     parts, _applied, _warns = core.create_parts(
-        bpy.context, model, [cut], keep_original=True, failures=failures)
-    check("the fixed margin cuts cleanly", len(parts) == 2,
-          f"got {len(parts)}: {failures}")
+        bpy.context, clean, [cut], keep_original=True, failures=failures)
+    check("and it cuts", len(parts) == 2, f"got {len(parts)}: {failures}")
 
 
 def scenario_unusable_line_reports(core):
@@ -1717,7 +1839,8 @@ def main():
     scenario_collar_full_extent(core)
     scenario_collar_plus_leftover_line(core)
     scenario_probe_finds_trouble(core)
-    scenario_welded_material_is_taken(core)
+    scenario_arm_at_shoulder(core)
+    scenario_material_across_line_blocks(core)
     scenario_overhang_outside_line_survives(core)
     scenario_check_operator(core)
     scenario_unusable_line_reports(core)

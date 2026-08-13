@@ -736,10 +736,10 @@ def create_parts(context, target, cuts, keep_original=True, part_gap=0.0,
                 remove_object(cutter)
                 cutter = None
                 probes = surface.probe_cut_line(cut, target)
-                _bad, _suggested, summary = surface.probe_summary(probes, cut)
-                failures.append(f"Cut '{cut.name}': {summary}. Open Edit Cut "
-                                "on Surface, or use Check Cut Line, to see "
-                                "the spots marked on the line")
+                reason = surface.failure_reason(probes, cut)
+                failures.append(
+                    f"Cut '{cut.name}': {reason}. Open Edit Cut on Surface, "
+                    "or use Check Cut Line, to see the spots marked on it")
                 continue
         else:
             parts, split_any = split_parts(parts, cutter, parts_coll)

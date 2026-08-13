@@ -96,14 +96,18 @@ Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
    re-fits itself to the line you are editing, so the region it fences
    is always one it can actually cut.
 
-   **What gets cut:** the material continuous with what lies inside your
-   line, and nothing else. A fin or spike welded across the line is part
-   of the piece, so it is cut through; a separate feature that merely
-   passes close by — an armour overhang beside a shoulder — is left
-   whole. If two features come closer together than one grid cell they
-   can read as one, so the cut refines the grid by itself when the region
-   reaches suspiciously far past the line; raise *Surface Detail* if a
-   piece you did not ring still comes off.
+   **What gets cut: the material inside your line, and nothing else.**
+   Draw round an arm at the armpit and the arm comes away — the body it
+   was joined to is left whole, even though the cut's plane carries on
+   through it. The cut takes a bite of a grid cell or so just outside the
+   line where the piece is welded on, since there is nowhere else to break
+   out; that lands on the seam where the piece was.
+
+   If something crosses your line — a strap, a fin, a spike joining the
+   piece to the model outside the line — the piece cannot come away
+   without cutting that too, which is outside your line. The cut says so
+   and marks the spots, rather than cutting it: take the line around it,
+   or move the line to where the piece is only attached inside it.
 
    **When a cut won't separate, the line shows you why.** Trouble spots
    are marked on the line as you work — amber where material carries on
@@ -165,8 +169,8 @@ step.
 - On-surface fine-tuning: drag the cut line's points along the model to
   reshape the cut, with add/remove points and adjustable falloff
 - Trouble spots marked on the cut line when a cut cannot separate
-- Neighbouring features are never cut: only material continuous with the
-  region inside the line is taken
+- Only material inside the line is cut: the rest of the model is left
+  whole, however far the cut's plane would carry on
 - Localized cuts: only the region ring-fenced by the cut line is severed,
   leaving the rest of the model whole
 - Built-in connector shapes plus custom connector meshes
@@ -210,9 +214,9 @@ On macOS the binary is usually
   runs off the model, doubles back so it fences nothing, or *Edge Margin*
   is too small to break through the surface, the cut says so instead of
   silently doing nothing.
-- Features closer together than one grid cell can be read as one. The cut
-  refines the grid automatically when it suspects this, but on very fine
-  detail raise *Surface Detail* if the wrong piece comes off.
+- A cut takes a bite of about one grid cell just outside the line where the
+  piece is welded to the model — there is nowhere else to break out. Raise
+  *Surface Detail* to make that bite smaller.
 - One cut has one plane. Lines facing more than about 45° away from the
   line you last edited are skipped with a warning — give each such region
   its own cut.

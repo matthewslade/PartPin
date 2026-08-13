@@ -338,6 +338,27 @@ def usable_loop_indices(cut):
     return indices
 
 
+def failure_reason(probes, cut):
+    """Why a cut that was expected to separate did not, in plain terms."""
+    bad = [p for p in probes if p['status'] != PROBE_OK]
+    bridges = sum(1 for p in bad if p['status'] == PROBE_BRIDGE)
+    others = [p for p in bad if p['status'] != PROBE_BRIDGE]
+    if bridges:
+        return (f"nothing came away — material outside the line still joins "
+                f"the piece at {bridges} spots along it. That material is left "
+                "whole on purpose, so take the line around it, or move the "
+                "line to where the piece is only attached inside it")
+    if others:
+        kinds = {}
+        for probe in others:
+            kinds[probe['status']] = kinds.get(probe['status'], 0) + 1
+        return ("nothing came away — " + "; ".join(
+            f"{count} spots where {PROBE_ADVICE.get(status, status)}"
+            for status, count in kinds.items()))
+    return ("nothing came away — the region inside the line is not joined to "
+            "the rest of the model in a way this cut can separate")
+
+
 def cut_line_problem(cut, minimum_roundness=0.02):
     """Why this cut cannot be made at all, or None if it can."""
     _usable, problem, _warning = loop_quality(cut, minimum_roundness)
@@ -698,6 +719,60 @@ def _dilate(mask, n, steps, blocked=None):
     return mask
 
 
+def densify_line(target, matrix, field, poly, subdivisions=4):
+    """Add points along the line, out where the cut really leaves the model.
+
+    A cut line is a ring of points joined by straight spans, so it cuts the
+    corners of the curve where the cut actually meets the surface, leaving a
+    hair of material just outside it. That hair is enough to hold the parts
+    together, which is why clipping the cut to the raw line does not
+    separate anything. Nudging the points between out to the real crossing
+    removes it.
+
+    Where the line runs across solid material — under an armpit, say — there
+    is no crossing to find, and the straight span is the honest answer: the
+    line itself is the boundary there.
+    """
+    count = len(poly)
+    if count < 3:
+        return list(poly)
+    dense = []
+    for index in range(count):
+        ax, ay = poly[index]
+        bx, by = poly[(index + 1) % count]
+        dense.append((ax, ay))
+        dx, dy = bx - ax, by - ay
+        length = (dx * dx + dy * dy) ** 0.5
+        if length < 1e-12:
+            continue
+        nx, ny = dy / length, -dx / length
+        probe = length * 0.02
+        if _in_polygon(ax + dx * 0.5 + nx * probe,
+                       ay + dy * 0.5 + ny * probe, poly):
+            nx, ny = -nx, -ny  # point the normal out of the polygon
+
+        step = length * 0.12
+        limit = length * 1.1
+        for k in range(1, max(int(subdivisions), 1)):
+            t = k / subdivisions
+            mx, my = ax + dx * t, ay + dy * t
+            here = matrix @ Vector((mx, my, field.eval(mx, my)))
+            if not core.point_inside(target, here):
+                dense.append((mx, my))  # already outside: the span is fine
+                continue
+            found = (mx, my)
+            travelled = step
+            while travelled <= limit:
+                px, py = mx + nx * travelled, my + ny * travelled
+                point = matrix @ Vector((px, py, field.eval(px, py)))
+                if not core.point_inside(target, point):
+                    found = (px, py)
+                    break
+                travelled += step
+            dense.append(found)
+    return dense
+
+
 def _patch_attempt(cut, target, field, polys, resolution, grow, pad):
     """One pass of the patch mask over a given extent.
 
@@ -768,52 +843,46 @@ def _patch_attempt(cut, target, field, polys, resolution, grow, pad):
                     or corner_inside[i][j + 1] or corner_inside[i + 1][j + 1]):
                 inside[i][j] = True
 
-    # Which material to cut. The cut line says *which* region; the material's
-    # own connectivity gives that region its shape, because the line is a
-    # ring of points joined by straight spans and so only approximates the
-    # curve where the cut really meets the surface.
-    #
-    # A region qualifies by containing material inside the line. Being near
-    # the line is not enough: a feature sitting just outside it — the armour
-    # overhang beside a shoulder — would qualify on proximity alone, and the
-    # cut would take a bite out of it while leaving the piece attached.
+    # What a localized cut may remove: material inside its own cut line, and
+    # nothing else. Taking whole connected regions instead — on the grounds
+    # that they are continuous with what is inside the line — slices the
+    # entire model apart wherever the piece is joined to it in the cut plane,
+    # such as an arm at the shoulder.
+    dense = [densify_line(target, matrix, field, poly) for poly in polys]
     interior = [[any(_in_polygon(*centres[i * n + j], poly)
-                     for poly in polys)
+                     for poly in dense)
                  for j in range(n)] for i in range(n)]
-    labels, count = _label_regions(inside, n)
-    wanted = {labels[i][j] for i in range(n) for j in range(n)
-              if inside[i][j] and interior[i][j]}
-    keep = [[labels[i][j] in wanted for j in range(n)] for i in range(n)]
+    keep = [[inside[i][j] and interior[i][j] for j in range(n)]
+            for i in range(n)]
     if not any(any(row) for row in keep):
         return None
 
-    # Material in any other region belongs to something the cut is not
-    # taking, so growth stops there and otherwise spreads through empty
-    # space only. That is what keeps a neighbouring feature intact.
-    other_material = [[inside[i][j] and not keep[i][j]
-                       for j in range(n)] for i in range(n)]
+    # Material outside the line is another part of the model and must
+    # survive, so growth for breaking out through the surface stops at it and
+    # otherwise spreads through empty space.
+    #
+    # It is allowed a bite of a cell or so right at the line, though. Where a
+    # piece joins the model there is no empty space to break out into — an
+    # arm at the armpit is welded to the body along the line itself — so a
+    # cut that refuses to touch anything outside the line could never free
+    # it. The bite is bounded by the grid, lands on the seam where the piece
+    # was, and cannot reach the body of a neighbouring feature.
+    skin = max(du, dv) * 1.5
+    other_material = [
+        [inside[i][j] and not interior[i][j]
+         and not any(_distance_to_loop(*centres[i * n + j], poly) <= skin
+                     for poly in dense)
+         for j in range(n)] for i in range(n)]
+    cell = max(min(du, dv), 1e-12)
+    keep = _dilate(keep, n, max(1, int(grow / cell + 0.5)),
+                   blocked=other_material)
+
     # Material being cut that reaches the edge of the extent means the piece
     # continues past it: the slab would stop mid-way through and the parts
     # would stay joined.
     spilled = any(keep[i][j] for i in range(n)
                   for j in (0, n - 1)) or any(
         keep[i][j] for j in range(n) for i in (0, n - 1))
-
-    # How far past the line the region reaches. A neighbouring feature that
-    # merely comes close — an armour overhang beside a shoulder — reads as
-    # part of the region once the gap between them is finer than the grid,
-    # and cutting would take a bite out of it. Reaching well past the line is
-    # the symptom; refining the grid tells the two cases apart, since a real
-    # weld survives refinement and a near miss does not.
-    reach = 0.0
-    span_uv = max(max(us) - min(us), max(vs) - min(vs), 1e-9)
-    for i in range(n):
-        for j in range(n):
-            if not (keep[i][j] and inside[i][j]) or interior[i][j]:
-                continue
-            u, v = centres[i * n + j]
-            distance = min(_distance_to_loop(u, v, poly) for poly in polys)
-            reach = max(reach, distance / span_uv)
 
     cell = max(min(du, dv), 1e-12)
     keep = _dilate(keep, n, max(1, int(grow / cell + 0.5)),
@@ -828,7 +897,7 @@ def _patch_attempt(cut, target, field, polys, resolution, grow, pad):
     return {'u0': u0, 'v0': v0, 'du': du, 'dv': dv, 'n': n,
             'keep': keep, 'material': inside, 'interior': interior,
             'beyond': other_material, 'heights': heights,
-            'thickness': thickness}, spilled, reach
+            'thickness': thickness}, spilled
 
 
 def patch_grid(cut, target, resolution, margin=None, indices=None):
@@ -859,22 +928,15 @@ def patch_grid(cut, target, resolution, margin=None, indices=None):
 
     patch = None
     detail = max(int(resolution), 8)
-    limit = detail * 2  # one refinement: enough to separate close features
-    for _attempt in range(6):
+    for _attempt in range(4):
         result = _patch_attempt(cut, target, field, polys, detail, grow, pad)
         if result is None:
             return None
-        patch, spilled, reach = result
+        patch, spilled = result
         if spilled:
             pad *= 2.0
             continue
-        if reach > 0.15 and detail < limit:
-            # Refine rather than risk reading a neighbouring feature as part
-            # of the region and taking a bite out of it.
-            detail *= 2
-            continue
         break
-    patch['reach'] = reach
     return patch
 
 
@@ -1092,11 +1154,21 @@ def probe_summary(probes, cut):
     kinds = {}
     for probe in bad:
         kinds[probe['status']] = kinds.get(probe['status'], 0) + 1
+    blockers = {s: c for s, c in kinds.items() if s != PROBE_BRIDGE}
+    if not blockers:
+        # Material against the line is normal — a piece is joined to the
+        # model somewhere. It is only worth mentioning, not a warning.
+        return bad, None, (f"Cut line encloses a region; "
+                           f"{kinds[PROBE_BRIDGE]} spots along it run against "
+                           "the rest of the model, which stays whole")
     described = [f"{count} spots where {PROBE_ADVICE.get(status, status)}"
-                 for status, count in sorted(kinds.items(),
+                 for status, count in sorted(blockers.items(),
                                              key=lambda kv: -kv[1])]
     summary = ("May stop this cut separating: " + "; ".join(described))
-    if PROBE_MARGIN in kinds and PROBE_BRIDGE not in kinds:
+    if PROBE_BRIDGE in kinds:
+        summary += (f" ({kinds[PROBE_BRIDGE]} spots run against material "
+                    "outside the line, which is left whole)")
+    if PROBE_MARGIN in blockers:
         summary += (f". Edge Margin {cut.pp_margin:.3f} → try "
                     f"{suggested:.3f}")
     return bad, suggested, summary
