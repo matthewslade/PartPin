@@ -19,8 +19,9 @@ POINT_COLOR = (0.96, 0.96, 0.96, 1.0)
 
 # Trouble spots found along the cut line, by kind.
 PROBE_COLORS = {
-    surface.PROBE_MARGIN: (1.0, 0.78, 0.0, 1.0),  # amber: needs more reach
-    surface.PROBE_STUCK: (1.0, 0.15, 0.15, 1.0),  # red: material runs on
+    surface.PROBE_BRIDGE: (1.0, 0.15, 0.15, 1.0),  # red: holds the piece on
+    surface.PROBE_MARGIN: (1.0, 0.78, 0.0, 1.0),   # amber: needs more reach
+    surface.PROBE_STUCK: (0.65, 0.35, 1.0, 1.0),   # violet: line off material
 }
 POINT_HOVER = (1.0, 0.95, 0.35, 1.0)
 POINT_ACTIVE = (0.35, 1.0, 0.45, 1.0)

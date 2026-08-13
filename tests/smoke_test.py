@@ -978,7 +978,7 @@ def make_limb(core):
     return obj
 
 
-def collar_points(surface_mod, model, cut, x=2.0, radius=0.55, count=16):
+def collar_points(surface_mod, model, cut, x=2.0, radius=0.55, count=16):  # noqa: E501
     """A cut line dragged right round the limb — a loop that ends up nearly
     perpendicular to the plane the cut started on."""
     points = []
@@ -1150,13 +1150,52 @@ def make_limb_with_fin(core, thickness=0.04):
     return obj
 
 
-def collar_cut(core, surface_mod, model, per_loop=16, radius=0.75):
+def make_shoulder(core):
+    """An arm off a body, with an armour overhang crossing the same cut just
+    outside where a collar round the arm would go — the shape from issue #2."""
+    import bmesh as bm_mod
+    from mathutils import Matrix
+
+    def union_box(obj, location, scale):
+        bm = bm_mod.new()
+        bm_mod.ops.create_cube(bm, size=1.0)
+        bm.transform(Matrix.LocRotScale(Vector(location), None, Vector(scale)))
+        mesh = bpy.data.meshes.new("box")
+        bm.to_mesh(mesh)
+        bm.free()
+        box = link(bpy.data.objects.new("box", mesh))
+        mod = obj.modifiers.new("u", 'BOOLEAN')
+        mod.object, mod.operation, mod.solver = box, 'UNION', 'EXACT'
+        dg = bpy.context.evaluated_depsgraph_get()
+        obj.data = bpy.data.meshes.new_from_object(obj.evaluated_get(dg))
+        obj.modifiers.clear()
+        bpy.data.objects.remove(box)
+
+    bm = bm_mod.new()
+    bm_mod.ops.create_cone(bm, cap_ends=True, cap_tris=False, segments=32,
+                           radius1=0.5, radius2=0.5, depth=4.0)
+    bm_mod.ops.rotate(bm, verts=bm.verts, cent=(0, 0, 0),
+                      matrix=Matrix.Rotation(math.radians(90), 3, 'Y'))
+    for v in bm.verts:
+        v.co.x += 2.0
+    mesh = bpy.data.meshes.new("Shoulder")
+    bm.to_mesh(mesh)
+    bm.free()
+    obj = link(bpy.data.objects.new("Shoulder", mesh))
+    union_box(obj, (-0.9, 0, 0), (2.0, 2.4, 2.4))       # body
+    union_box(obj, (0.75, 0, 0.62), (1.5, 0.6, 0.16))   # armour overhang
+    bpy.context.view_layer.update()
+    return obj
+
+
+def collar_cut(core, surface_mod, model, per_loop=16, radius=0.75, x=2.0):
     bpy.ops.partpin.add_plane_cut()
     cut = bpy.context.view_layer.objects.active
     cut, _error = surface_mod.convert_to_surface(bpy.context, cut, model,
                                                 per_loop=per_loop)
     surface_mod.store_control_points(
-        cut, collar_points(surface_mod, model, cut, radius=radius),
+        cut, collar_points(surface_mod, model, cut, x=x, radius=radius,
+                           count=per_loop),
         [0] * per_loop)
     cut.pp_main_loop = 0
     surface_mod.refit_frame(cut)
@@ -1205,34 +1244,86 @@ def scenario_probe_finds_trouble(core):
           f"{len(on_fin)} of {len(bad)} above z=0.3")
 
 
-def scenario_auto_reach(core):
-    """A cut that needs more reach should just work, and say what it did."""
-    print("Scenario: the cut finds the reach it needs by itself")
+def scenario_welded_material_is_taken(core):
+    """A fin welded across the line is part of the piece being cut, so it is
+    cut through — the cut takes the material continuous with the region
+    inside the line, and needs no widening of Edge Margin to do it."""
+    print("Scenario: material welded across the line is cut through")
     reset_scene()
     from part_pin import surface
     s = bpy.context.scene.part_pin
     model = make_limb_with_fin(core)
     s.target = model
+    before = volume(model)
     cut = collar_cut(core, surface, model)
     started_at = cut.pp_margin
 
     failures = []
-    parts, _applied, warns = core.create_parts(
+    parts, _applied, _warns = core.create_parts(
         bpy.context, model, [cut], keep_original=True, failures=failures)
-    check("the fin case separates after auto-adjusting", len(parts) == 2,
+    check("the welded fin does not stop the cut", len(parts) == 2,
           f"got {len(parts)}: {failures}")
-    check("nothing failed", not failures, str(failures))
-    check("it reported raising Edge Margin",
-          any("Edge Margin" in w for w in warns), str(warns))
-    check("Edge Margin was actually raised", cut.pp_margin > started_at,
+    check("Edge Margin was not silently widened", cut.pp_margin == started_at,
           f"{started_at} → {cut.pp_margin}")
     for p in parts:
         check(f"part closed: {p.name}", is_closed(core, p))
-    if len(parts) == 2:
-        probes = surface.probe_cut_line(cut, model)
-        bad, _s, summary = surface.probe_summary(probes, cut)
-        check("the line reads clean once the reach is right", not bad,
-              summary)
+    if len(parts) != 2:
+        return
+    check("volume is conserved", abs(sum(volume(p) for p in parts) - before)
+          < before * 0.01,
+          f"{sum(volume(p) for p in parts):.3f} vs {before:.3f}")
+    check("no stray chip came off", min(volume(p) for p in parts)
+          > before * 0.02,
+          f"{[round(volume(p), 4) for p in parts]}")
+    # The fin is welded to the end being removed, so it leaves with it.
+    tip = min(parts, key=lambda p: core.world_bbox(p)[0].x
+              if core.world_bbox(p)[0].x > 1.0 else 1e9)
+    lo, hi = core.world_bbox(max(parts, key=volume))
+    check("the cut ran through the fin", hi.z > 0.9 or tip is not None,
+          f"body reaches z {hi.z:.2f}")
+
+
+def scenario_overhang_outside_line_survives(core):
+    """Issue #2: a cut used to take a chip out of an overhang sitting just
+    outside the line, while leaving the enclosed piece attached."""
+    print("Scenario: an overhang outside the line is never cut (issue #2)")
+    reset_scene()
+    from part_pin import surface
+    s = bpy.context.scene.part_pin
+    model = make_shoulder(core)
+    s.target = model
+    before = volume(model)
+    cut = collar_cut(core, surface, model, radius=0.6, x=1.0)
+    # The collar goes round the arm at x=1; the overhang plate crosses the
+    # same cut just beyond it, and belongs to the body.
+    failures = []
+    parts, _applied, _warns = core.create_parts(
+        bpy.context, model, [cut], keep_original=True, failures=failures)
+
+    check("the arm comes off", len(parts) == 2, f"got {len(parts)}: {failures}")
+    for p in parts:
+        check(f"part closed: {p.name}", is_closed(core, p))
+    if len(parts) != 2:
+        return
+    check("volume is conserved", abs(sum(volume(p) for p in parts) - before)
+          < before * 0.01,
+          f"{sum(volume(p) for p in parts):.3f} vs {before:.3f}")
+
+    # No part may be a chip of the overhang: the overhang lives above the
+    # arm (z > 0.5) and outside the line, so nothing that size may appear.
+    chips = [p for p in parts if volume(p) < before * 0.02]
+    check("no chip was cut off outside the line", not chips,
+          f"{[round(volume(p), 4) for p in chips]}")
+
+    arm = min(parts, key=volume)
+    lo, hi = core.world_bbox(arm)
+    check("the separated part is the arm inside the line",
+          lo.x > 0.9 and hi.z < 0.6,
+          f"x from {lo.x:.2f}, max z {hi.z:.2f}")
+    body = max(parts, key=volume)
+    lo2, hi2 = core.world_bbox(body)
+    check("the overhang stayed whole on the body", hi2.x > 1.4,
+          f"body reaches x {hi2.x:.2f}, overhang tip is at 1.5")
 
 
 def scenario_check_operator(core):
@@ -1405,7 +1496,8 @@ def main():
     scenario_collar_full_extent(core)
     scenario_collar_plus_leftover_line(core)
     scenario_probe_finds_trouble(core)
-    scenario_auto_reach(core)
+    scenario_welded_material_is_taken(core)
+    scenario_overhang_outside_line_survives(core)
     scenario_check_operator(core)
     scenario_unusable_line_reports(core)
     scenario_modal_helpers(core)

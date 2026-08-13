@@ -79,14 +79,24 @@ Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
    re-fits itself to the line you are editing, so the region it fences
    is always one it can actually cut.
 
+   **What gets cut:** the material continuous with what lies inside your
+   line, and nothing else. A fin or spike welded across the line is part
+   of the piece, so it is cut through; a separate feature that merely
+   passes close by — an armour overhang beside a shoulder — is left
+   whole. If two features come closer together than one grid cell they
+   can read as one, so the cut refines the grid by itself when the region
+   reaches suspiciously far past the line; raise *Surface Detail* if a
+   piece you did not ring still comes off.
+
    **When a cut won't separate, the line shows you why.** Trouble spots
    are marked on the line as you work — amber where material carries on
    just outside the line so the cut cannot reach clear of it, red where
    material runs well past it (a strap, a fin, a spike bridging the two
    halves). Press **C** to re-check, or use **Check Line** in the panel.
-   **Fix Margin** sets Edge Margin to the reach the line needs. Create
-   Parts also tries further reaches by itself and tells you when it had
-   to, so most of the time this sorts itself out.
+   **Fix Margin** sets Edge Margin to the reach the line needs. The cut
+   never widens its own reach into neighbouring material to force a
+   separation — it reports instead, because quietly taking a bite out of
+   the feature next door is worse than saying it could not do it.
 
    A cut picks up a line on **every** feature it crosses, and each one
    cuts. Hover a line and press **Alt+X** to drop the ones you don't
@@ -135,8 +145,9 @@ step.
 - Drawn curved cuts (freehand stroke in the viewport)
 - On-surface fine-tuning: drag the cut line's points along the model to
   reshape the cut, with add/remove points and adjustable falloff
-- Trouble spots marked on the cut line when a cut cannot separate, with an
-  automatic fix for the common case
+- Trouble spots marked on the cut line when a cut cannot separate
+- Neighbouring features are never cut: only material continuous with the
+  region inside the line is taken
 - Localized cuts: only the region ring-fenced by the cut line is severed,
   leaving the rest of the model whole
 - Built-in connector shapes plus custom connector meshes
@@ -180,6 +191,9 @@ On macOS the binary is usually
   runs off the model, doubles back so it fences nothing, or *Edge Margin*
   is too small to break through the surface, the cut says so instead of
   silently doing nothing.
+- Features closer together than one grid cell can be read as one. The cut
+  refines the grid automatically when it suspects this, but on very fine
+  detail raise *Surface Detail* if the wrong piece comes off.
 - One cut has one plane. Lines facing more than about 45° away from the
   line you last edited are skipped with a warning — give each such region
   its own cut.

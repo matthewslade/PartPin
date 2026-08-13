@@ -674,7 +674,14 @@ def _label_regions(mask, n):
     return labels, count
 
 
-def _dilate(mask, n, steps):
+def _dilate(mask, n, steps, blocked=None):
+    """Grow a mask, never into a blocked cell.
+
+    Growth exists only to push the cut out through the model's surface into
+    empty space just past the cut line. Blocking cells that hold material
+    outside the line is what keeps "cut inside line only" literally true:
+    the cut can then never take a bite out of a neighbouring feature.
+    """
     for _ in range(max(int(steps), 0)):
         grown = [row[:] for row in mask]
         for i in range(n):
@@ -684,33 +691,23 @@ def _dilate(mask, n, steps):
                 for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                     a, b = i + di, j + dj
                     if 0 <= a < n and 0 <= b < n:
+                        if blocked is not None and blocked[a][b]:
+                            continue
                         grown[a][b] = True
         mask = grown
     return mask
 
 
-def patch_grid(cut, target, resolution, margin=None, indices=None):
-    """Grid over the cut, with a mask of the cells to actually cut.
+def _patch_attempt(cut, target, field, polys, resolution, grow, pad):
+    """One pass of the patch mask over a given extent.
 
-    The mask is *where the cut surface runs through the model*, restricted
-    to the region(s) enclosed by this cut's lines, then grown a little so
-    the patch breaks out through the surface all the way round. Deriving
-    it from real inside/outside tests rather than from the cut line's
-    outline keeps it correct however far the reshaped surface has moved.
+    Returns (patch, spilled, crowded). `spilled` means the region being cut
+    ran off the edge of this extent, so the caller should widen it.
+    `crowded` means another feature comes within a cell of the region, so
+    the two may have merged and the caller should refine the grid.
     """
-    loops = control_loops(cut)
-    if indices is None:
-        indices = usable_loop_indices(cut) or list(range(len(loops)))
-    polys = [[(p.x, p.y) for p in loops[i]] for i in indices]
-    if not polys:
-        return None
-    field = field_for(cut, indices)
     us = [u for poly in polys for u, _v in poly]
     vs = [v for poly in polys for _u, v in poly]
-    span = max(max(us) - min(us), max(vs) - min(vs), 1e-9)
-    factor = cut.pp_margin if margin is None else margin
-    grow = span * max(factor, 1e-4)
-    pad = max(grow * 3.0, field.radius if not field.is_flat else grow)
     u0, u1 = min(us) - pad, max(us) + pad
     v0, v1 = min(vs) - pad, max(vs) + pad
 
@@ -771,42 +768,56 @@ def patch_grid(cut, target, resolution, margin=None, indices=None):
                     or corner_inside[i][j + 1] or corner_inside[i + 1][j + 1]):
                 inside[i][j] = True
 
-    keep = [[False] * n for _ in range(n)]
-    labels, count = _label_regions(inside, n)
-    if count:
-        # Keep the region(s) this cut's lines enclose. A cell seeds a region
-        # if it is inside the model and either within the line or hugging
-        # it: cells just inside the line are in the enclosed region, while
-        # cells just outside it are outside the model and cannot seed. That
-        # holds even when the flattened line is an awkward shape, which a
-        # point-in-polygon test alone does not.
-        band = max(grow * 2.0, max(du, dv) * 1.5)
-        wanted = set()
-        for i in range(n):
-            for j in range(n):
-                if labels[i][j] < 0:
-                    continue
-                u, v = centres[i * n + j]
-                near = any(_distance_to_loop(u, v, poly) <= band
-                           for poly in polys)
-                if near or inside_loops(u, v, polys):
-                    wanted.add(labels[i][j])
-        if wanted:
-            for i in range(n):
-                for j in range(n):
-                    if labels[i][j] in wanted:
-                        keep[i][j] = True
-
-    if not any(any(row) for row in keep):
-        # The surface never enters the model inside its own cut lines;
-        # fall back to the outline so the user still gets a cut attempt.
-        keep = [[inside_loops(*centres[i * n + j], polys, grow)
+    # Which material to cut. The cut line says *which* region; the material's
+    # own connectivity gives that region its shape, because the line is a
+    # ring of points joined by straight spans and so only approximates the
+    # curve where the cut really meets the surface.
+    #
+    # A region qualifies by containing material inside the line. Being near
+    # the line is not enough: a feature sitting just outside it — the armour
+    # overhang beside a shoulder — would qualify on proximity alone, and the
+    # cut would take a bite out of it while leaving the piece attached.
+    interior = [[any(_in_polygon(*centres[i * n + j], poly)
+                     for poly in polys)
                  for j in range(n)] for i in range(n)]
-        if not any(any(row) for row in keep):
-            return None
+    labels, count = _label_regions(inside, n)
+    wanted = {labels[i][j] for i in range(n) for j in range(n)
+              if inside[i][j] and interior[i][j]}
+    keep = [[labels[i][j] in wanted for j in range(n)] for i in range(n)]
+    if not any(any(row) for row in keep):
+        return None
+
+    # Material in any other region belongs to something the cut is not
+    # taking, so growth stops there and otherwise spreads through empty
+    # space only. That is what keeps a neighbouring feature intact.
+    other_material = [[inside[i][j] and not keep[i][j]
+                       for j in range(n)] for i in range(n)]
+    # Material being cut that reaches the edge of the extent means the piece
+    # continues past it: the slab would stop mid-way through and the parts
+    # would stay joined.
+    spilled = any(keep[i][j] for i in range(n)
+                  for j in (0, n - 1)) or any(
+        keep[i][j] for j in range(n) for i in (0, n - 1))
+
+    # How far past the line the region reaches. A neighbouring feature that
+    # merely comes close — an armour overhang beside a shoulder — reads as
+    # part of the region once the gap between them is finer than the grid,
+    # and cutting would take a bite out of it. Reaching well past the line is
+    # the symptom; refining the grid tells the two cases apart, since a real
+    # weld survives refinement and a near miss does not.
+    reach = 0.0
+    span_uv = max(max(us) - min(us), max(vs) - min(vs), 1e-9)
+    for i in range(n):
+        for j in range(n):
+            if not (keep[i][j] and inside[i][j]) or interior[i][j]:
+                continue
+            u, v = centres[i * n + j]
+            distance = min(_distance_to_loop(u, v, poly) for poly in polys)
+            reach = max(reach, distance / span_uv)
 
     cell = max(min(du, dv), 1e-12)
-    keep = _dilate(keep, n, max(1, int(grow / cell + 0.5)))
+    keep = _dilate(keep, n, max(1, int(grow / cell + 0.5)),
+                   blocked=other_material)
 
     nodes = [(u0 + du * i, v0 + dv * j)
              for i in range(n + 1) for j in range(n + 1)]
@@ -815,8 +826,56 @@ def patch_grid(cut, target, resolution, margin=None, indices=None):
                for i in range(n + 1)]
     thickness = max(core.bbox_diagonal(target) * SEAM_FACTOR, 1e-9)
     return {'u0': u0, 'v0': v0, 'du': du, 'dv': dv, 'n': n,
-            'keep': keep, 'material': inside, 'heights': heights,
-            'thickness': thickness}
+            'keep': keep, 'material': inside, 'interior': interior,
+            'beyond': other_material, 'heights': heights,
+            'thickness': thickness}, spilled, reach
+
+
+def patch_grid(cut, target, resolution, margin=None, indices=None):
+    """Grid over the cut, with a mask of the cells to actually cut.
+
+    The mask is *where the cut surface runs through the model*, limited to
+    the material continuous with what lies inside this cut's lines. Deriving
+    it from real inside/outside tests rather than from the line's outline
+    keeps it correct however far the reshaped surface has moved.
+
+    The extent widens until the region being cut fits inside it, so a piece
+    that carries on past the line — a fin, a spike, a strap welded to it —
+    is still cut through rather than left holding the parts together.
+    """
+    loops = control_loops(cut)
+    if indices is None:
+        indices = usable_loop_indices(cut) or list(range(len(loops)))
+    polys = [[(p.x, p.y) for p in loops[i]] for i in indices]
+    if not polys:
+        return None
+    field = field_for(cut, indices)
+    us = [u for poly in polys for u, _v in poly]
+    vs = [v for poly in polys for _u, v in poly]
+    span = max(max(us) - min(us), max(vs) - min(vs), 1e-9)
+    factor = cut.pp_margin if margin is None else margin
+    grow = span * max(factor, 1e-4)
+    pad = max(grow * 3.0, field.radius if not field.is_flat else grow)
+
+    patch = None
+    detail = max(int(resolution), 8)
+    limit = detail * 2  # one refinement: enough to separate close features
+    for _attempt in range(6):
+        result = _patch_attempt(cut, target, field, polys, detail, grow, pad)
+        if result is None:
+            return None
+        patch, spilled, reach = result
+        if spilled:
+            pad *= 2.0
+            continue
+        if reach > 0.15 and detail < limit:
+            # Refine rather than risk reading a neighbouring feature as part
+            # of the region and taking a bite out of it.
+            detail *= 2
+            continue
+        break
+    patch['reach'] = reach
+    return patch
 
 
 def _patch_bm(patch, thickness=None):
@@ -884,13 +943,16 @@ def _patch_bm(patch, thickness=None):
 
 # What a probed spot along the cut line found.
 PROBE_OK = 'OK'          # the cut breaks out through the surface here
-PROBE_MARGIN = 'MARGIN'  # more material just past the line: needs more reach
-PROBE_STUCK = 'STUCK'    # material keeps going as far as the probe can see
+PROBE_BRIDGE = 'BRIDGE'  # material crosses the line and holds the parts on
+PROBE_MARGIN = 'MARGIN'  # the region runs past the cut's own reach
+PROBE_STUCK = 'STUCK'    # this stretch of line is not on cuttable material
 
 PROBE_ADVICE = {
-    PROBE_MARGIN: "have more material just outside the line (raise Edge Margin)",
-    PROBE_STUCK: ("have material running well past the line — take the line "
-                  "around it, or cut there instead"),
+    PROBE_BRIDGE: ("material crosses the line and will hold the piece on — "
+                   "take the line around it, or move the line"),
+    PROBE_MARGIN: ("the region carries on past the cut's reach — raise Edge "
+                   "Margin"),
+    PROBE_STUCK: "the line is not on material the cut can take",
 }
 
 
@@ -949,13 +1011,37 @@ def probe_cut_line(cut, target, resolution=None, per_loop=48):
     def cell_of(u, v):
         return (int((u - u0) / du), int((v - v0) / dv))
 
+    interior = patch.get('interior', keep)
+    beyond = patch.get('beyond', None)
     results = []
-    # Cells kept right on the outer ring of the grid. The patch always grows
-    # at least one cell past the material it found, so material reaching the
-    # very edge means the cut was clipped there and stops mid-way through it.
+
+    # Material that crosses the line: it lies beyond the line, so the cut
+    # leaves it alone, yet it is right against the region being cut and will
+    # hold the piece on. This is the usual reason a line that looks right
+    # refuses to separate. Same tolerance as the cut itself uses, so the
+    # hair of material along the line is not mistaken for a neighbour.
     for i in range(n):
         for j in range(n):
-            if not material[i][j]:
+            if beyond is None or not beyond[i][j]:
+                continue
+            touches = False
+            for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                a, b = i + di, j + dj
+                if 0 <= a < n and 0 <= b < n and keep[a][b]:
+                    touches = True
+                    break
+            if touches:
+                results.append({
+                    'position': world_of(u0 + du * (i + 0.5),
+                                         v0 + dv * (j + 0.5)),
+                    'status': PROBE_BRIDGE,
+                    'needed': 0.0,
+                })
+
+    # The region being cut running off the edge of the cut's own reach.
+    for i in range(n):
+        for j in range(n):
+            if not (material[i][j] and interior[i][j]):
                 continue
             if 0 < i < n - 1 and 0 < j < n - 1:
                 continue
@@ -998,7 +1084,7 @@ def probe_summary(probes, cut):
                       if p['status'] in (PROBE_OK, PROBE_STUCK))
     if not bad:
         return [], None, (f"Cut line looks good — it closes round the region "
-                          f"and the cut reaches clear of it "
+                          f"and nothing crosses it "
                           f"({line_points} points checked)")
 
     needed = max(p['needed'] for p in probes)
@@ -1006,11 +1092,11 @@ def probe_summary(probes, cut):
     kinds = {}
     for probe in bad:
         kinds[probe['status']] = kinds.get(probe['status'], 0) + 1
-    described = [f"{count} spots {PROBE_ADVICE.get(status, status)}"
+    described = [f"{count} spots where {PROBE_ADVICE.get(status, status)}"
                  for status, count in sorted(kinds.items(),
                                              key=lambda kv: -kv[1])]
-    summary = "This cut will not separate: " + "; ".join(described)
-    if PROBE_MARGIN in kinds:
+    summary = ("May stop this cut separating: " + "; ".join(described))
+    if PROBE_MARGIN in kinds and PROBE_BRIDGE not in kinds:
         summary += (f". Edge Margin {cut.pp_margin:.3f} → try "
                     f"{suggested:.3f}")
     return bad, suggested, summary
