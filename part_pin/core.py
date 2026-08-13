@@ -632,7 +632,7 @@ def drop_debris(pieces, share=1e-4):
 
 
 def split_parts_surgery(parts, rings, normals, normal, scene, parts_coll,
-                        settle=None):
+                        settle=None, stuck=None):
     """Cut every part the drawn line runs across, and leave the rest whole.
 
     A line only ever crosses one of the parts on the table, and it may cross
@@ -643,10 +643,15 @@ def split_parts_surgery(parts, rings, normals, normal, scene, parts_coll,
 
     result = []
     split_any = False
+    if stuck is None:
+        stuck = []
     for part in parts:
-        pieces, _problem = mesh_cut.cut_object(part, rings, normals, normal,
-                                               scene, parts_coll, settle)
+        pieces, _problem, spots = mesh_cut.cut_object(
+            part, rings, normals, normal, scene, parts_coll, settle)
         if pieces is None:
+            # Keep the closest account of why, so the editor can mark it.
+            if spots and (not stuck or len(spots) < len(stuck)):
+                stuck[:] = spots
             result.append(part)
             continue
         remove_object(part)
@@ -746,15 +751,17 @@ def create_parts(context, target, cuts, keep_original=True, part_gap=0.0,
                                                            min_alignment=0.0)
             if note:
                 warnings.append(f"Cut '{cut.name}': {note}")
+            stuck = []
             parts, split_any = split_parts_surgery(parts, rings, normals,
                                                    normal, scene, parts_coll,
-                                                   settle)
+                                                   settle, stuck)
+            surface.remember_stuck(cut, stuck)
             if not split_any:
                 # Say why, and leave it at that. Reaching further to force a
                 # separation would cut material outside the line, which is
                 # the one thing this mode promises not to do.
                 failures.append(
-                    f"Cut '{cut.name}': {surface.failure_reason(cut, target)}")
+                    f"Cut '{cut.name}': {surface.failure_reason(stuck)}")
             continue
 
         if cut.pp_cut_kind == 'SURFACE':
@@ -769,6 +776,19 @@ def create_parts(context, target, cuts, keep_original=True, part_gap=0.0,
         remove_object(cutter)
 
     context.view_layer.update()
+
+    if len(parts) < 2 and failures:
+        # Nothing was cut, so leave the scene as it was found: the one "part"
+        # is a copy of the model and its collection is empty of meaning, and
+        # clearing them away is what lets the cut stay put and stay editable.
+        # Having to undo to get a failed cut back is worse than the failure.
+        for part in parts:
+            remove_object(part)
+        try:
+            bpy.data.collections.remove(parts_coll)
+        except Exception:
+            pass
+        return [], 0, warnings
 
     applied = 0
     if len(parts) > 1:

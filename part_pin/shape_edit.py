@@ -18,9 +18,11 @@ LINE_COLOR_HIDDEN = (1.0, 0.62, 0.16, 0.22)
 POINT_COLOR = (0.96, 0.96, 0.96, 1.0)
 
 TROUBLE_COLORS = {
+    surface.STUCK: (1.0, 0.15, 0.15, 1.0),    # red: the cut cannot get through
     surface.ADRIFT: (1.0, 0.95, 0.30, 1.0),   # yellow: line off the model
 }
 TROUBLE_LABELS = {
+    surface.STUCK: "red = the cut cannot get through here",
     surface.ADRIFT: "yellow = off the model",
 }
 CAP_COLOR = (1.0, 0.62, 0.16, 0.16)       # the lid that will do the cutting
@@ -228,7 +230,7 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
             self.report({'INFO'}, "This cut is not limited to its line")
             return
         try:
-            pieces, _joined, _holes = surface.trial_cut(self.cut, self.target)
+            pieces, _spots = surface.trial_cut(self.cut, self.target)
         except Exception:
             self.report({'WARNING'}, "Could not try the cut")
             return
@@ -610,29 +612,13 @@ class PARTPIN_OT_check_cut_line(bpy.types.Operator):
             self.report({'INFO'}, "This cut is not limited to its line")
             return {'FINISHED'}
 
-        pieces, joined, holes = surface.trial_cut(cut, target)
+        pieces, spots = surface.trial_cut(cut, target)
         if pieces >= 2:
             self.report({'INFO'},
                         f"Cut '{cut.name}' separates into {pieces} parts")
             return {'FINISHED'}
-        if joined:
-            self.report({'WARNING'},
-                        f"Cut '{cut.name}' would not separate: still buried in "
-                        f"the model at {len(joined)} spots along the line. Move "
-                        "the line to where the piece is clear, or raise "
-                        "Undercut. Open Edit Cut on Surface to see them in red")
-        elif holes:
-            self.report({'WARNING'},
-                        f"Cut '{cut.name}' would not separate: the cut surface "
-                        f"leaves the model in {len(holes)} places, so the line "
-                        "encloses space as well as solid material and the two "
-                        "sides join around it. Bring the line in closer where "
-                        "it rides over a raised edge. Open Edit Cut on Surface "
-                        "to see them in violet")
-        else:
-            self.report({'WARNING'},
-                        f"Cut '{cut.name}' would not separate — the piece is "
-                        "joined to the model somewhere the line does not cross")
+        self.report({'WARNING'},
+                    f"Cut '{cut.name}': {surface.failure_reason(spots)}")
         return {'FINISHED'}
 
 

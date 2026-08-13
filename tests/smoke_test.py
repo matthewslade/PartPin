@@ -1457,7 +1457,17 @@ def scenario_unusable_line_reports(core):
         bpy.context, model, [cut], keep_original=True, failures=failures)
     check("create_parts surfaces the reason", len(failures) == 1,
           str(failures))
-    check("model is left in one piece", len(parts) == 1, f"got {len(parts)}")
+    # Nothing is made at all, rather than a "parts" collection holding one
+    # copy of the model: the cut has to stay put and stay editable, and having
+    # to undo a failure to get back to it is worse than the failure.
+    check("nothing is made", len(parts) == 0, f"got {len(parts)}")
+    check("the model is left alone and visible",
+          model.name in bpy.context.scene.objects and not model.hide_get())
+    check("no parts collection is left behind",
+          not [c for c in bpy.data.collections if c.name.endswith("Parts")],
+          str([c.name for c in bpy.data.collections]))
+    check("the cut is still there to fix",
+          cut.name in bpy.context.scene.objects and not cut.hide_get())
 
 
 def hand_stroke(surface_mod, model, x=2.0, count=90, wobble=0.06, gap=0):
@@ -1543,9 +1553,9 @@ def scenario_corners_are_kept(core):
                      for corner in corners)
         check(f"the cut surface reaches the corners ({per_loop})",
               missed < 0.1, f"missed by {missed:.3f} of a 1.0 half-width")
-        pieces, joined, holes = surface.trial_cut(cut, model)
+        pieces, spots = surface.trial_cut(cut, model)
         check(f"and the cube separates ({per_loop})", pieces == 2,
-              f"{pieces} pieces, {len(joined)} red, {len(holes)} violet")
+              f"{pieces} pieces, {len(spots)} stuck")
         core.remove_object(cut)
 
 
@@ -1817,9 +1827,9 @@ def scenario_lid_reaches_the_line(core):
           f"furthest {worst:.4f} = {worst / diagonal * 100:.2f}% of the model")
 
     # Which is what lets it cut with points this sparse.
-    pieces, joined, holes = surface.trial_cut(cut, model)
+    pieces, spots = surface.trial_cut(cut, model)
     check("and it separates", pieces == 2,
-          f"{pieces} pieces, {len(joined)} red, {len(holes)} violet")
+          f"{pieces} pieces, {len(spots)} stuck")
 
 
 def scenario_trial_cut(core):
@@ -1835,10 +1845,9 @@ def scenario_trial_cut(core):
     s.target = model
     cut = collar_cut(core, surface, model)
     before = volume(model)
-    pieces, joined, holes = surface.trial_cut(cut, model)
+    pieces, spots = surface.trial_cut(cut, model)
     check("a good line is reported as separating", pieces == 2, f"{pieces}")
-    check("and carries no marks", not joined and not holes,
-          f"{len(joined)} red, {len(holes)} violet")
+    check("and carries no marks", not spots, f"{len(spots)} stuck")
     check("the model itself is untouched",
           abs(volume(model) - before) < 1e-9 and model.name
           in bpy.context.scene.objects)
@@ -1855,15 +1864,14 @@ def scenario_trial_cut(core):
     finned = make_limb_with_fin(core)
     s.target = finned
     across = collar_cut(core, surface, finned)
-    pieces, joined, holes = surface.trial_cut(across, finned)
+    pieces, spots = surface.trial_cut(across, finned)
     failures = []
     parts, _applied, _warns = core.create_parts(
         bpy.context, finned, [across], keep_original=True, failures=failures)
     check("the trial matches what the cut does", len(parts) == pieces,
           f"trial {pieces}, cut {len(parts)}: {failures}")
     check("a line across a fin still separates", pieces == 2, f"{pieces}")
-    check("and carries no marks either", not joined and not holes,
-          f"{len(joined)} red, {len(holes)} violet")
+    check("and carries no marks either", not spots, f"{len(spots)} stuck")
 
 
 def scenario_seam_lands_on_the_line(core):
@@ -1918,6 +1926,91 @@ def scenario_seam_lands_on_the_line(core):
     strays = [o.name for o in bpy.context.scene.objects
               if o.name.startswith("PartPin_")]
     check("no working objects are left in the scene", not strays, str(strays))
+
+
+def scenario_parts_can_be_cut_again(core):
+    """A part is a model. Cutting one again is how a big model gets down to
+    a printable size, and the Model list has to offer them to allow it."""
+    print("Scenario: a part can be picked as the model and cut again")
+    reset_scene()
+    from part_pin import props, surface
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    cut = collar_cut(core, surface, model)
+    bpy.ops.partpin.create_parts()
+    parts = parts_of(s)
+    check("two parts to start with", len(parts) == 2, f"got {len(parts)}")
+    if len(parts) != 2:
+        return
+
+    check("a part is offered in the Model list",
+          all(props._target_poll(s, p) for p in parts),
+          str([(p.name, p.pp_role) for p in parts]))
+    check("a cut is still not offered", not props._target_poll(s, cut))
+
+    # And picking one really does cut it again.
+    # The shaft, not the head: a collar wants a straight stretch to sit on.
+    def length_of(part):
+        lo, hi = core.world_bbox(part)
+        return hi.x - lo.x
+
+    shaft = max(parts, key=length_of)
+    before = volume(shaft)
+    s.target = shaft
+    check("the part can actually be set as the model", s.target == shaft)
+    lo, hi = core.world_bbox(shaft)
+    again = collar_cut(core, surface, shaft, x=(lo.x + hi.x) * 0.5)
+    if again is None:
+        check("a second cut is drawn on the part", False)
+        return
+    failures = []
+    made, _applied, _warns = core.create_parts(
+        bpy.context, shaft, [again], keep_original=True, failures=failures)
+    check("the part splits in two", len(made) == 2,
+          f"got {len(made)}: {failures}")
+    for p in made:
+        check(f"part closed: {p.name}", is_closed(core, p))
+    if len(made) == 2:
+        check("and it is still all there",
+              abs(sum(volume(p) for p in made) - before) < before * 1e-6,
+              f"{sum(volume(p) for p in made):.4f} vs {before:.4f}")
+
+
+def scenario_a_failed_cut_stays_put(core):
+    """A cut that fails has to still be there, with the trouble marked.
+
+    Tearing the scene down on failure — hiding the cut, hiding the model, and
+    leaving a collection holding one uncut copy — meant undoing to get back to
+    a line that needed a nudge, with nothing to show where to nudge it.
+    """
+    print("Scenario: a cut that fails stays put, and says where")
+    reset_scene()
+    from part_pin import surface
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    cut = collar_cut(core, surface, model)
+
+    # The plumbing that carries "where it got stuck" from the cutter to the
+    # marks on the model, driven directly since every fixture here does cut.
+    spots = [Vector((2.0, 0.4, 0.0)), Vector((2.0, -0.4, 0.0))]
+    surface.remember_stuck(cut, spots)
+    found = surface.inspect_cut(cut, model)
+    check("the stuck spots are marked", len(found.get(surface.STUCK, [])) == 2,
+          str({k: len(v) for k, v in found.items()}))
+    check("the mark has advice to give", surface.STUCK in surface.TROUBLE)
+    reason = surface.failure_reason(spots)
+    check("the reason counts them", "2 spot" in reason, reason)
+    check("and says where to look", "Edit Cut on Surface" in reason, reason)
+
+    # A cut that works clears them: marks left over from a failure would sit
+    # on the model claiming a working cut is broken.
+    pieces, left = surface.trial_cut(cut, model)
+    check("the collar does cut", pieces == 2, f"{pieces}")
+    check("trying it clears the old marks", not left, f"{len(left)} stuck")
+    check("and nothing is marked any more",
+          not any(surface.inspect_cut(cut, model).values()))
 
 
 def scenario_line_hugs_surface(core):
@@ -2085,7 +2178,7 @@ def scenario_inspection_marks(core):
         check(f"a cut that works reports nothing wrong ({label})",
               not any(found.values()),
               ", ".join(f"{k}={len(v)}" for k, v in found.items() if v))
-        pieces, _j, _h = surface.trial_cut(cut, model)
+        pieces, _spots = surface.trial_cut(cut, model)
         check(f"and it does cut ({label})", pieces == 2, f"{pieces} pieces")
 
     # The awkward one. A fin crossing the line used to be marked in red as a
@@ -2098,7 +2191,7 @@ def scenario_inspection_marks(core):
     s.target = model
     cut = collar_cut(core, surface, model)
     found = surface.inspect_cut(cut, model)
-    pieces, _j, _h = surface.trial_cut(cut, model)
+    pieces, _spots = surface.trial_cut(cut, model)
     check("a line running across a fin cuts", pieces == 2, f"{pieces} pieces")
     check("and is marked with nothing at all", not any(found.values()),
           ", ".join(f"{k}={len(v)}" for k, v in found.items() if v))
@@ -2344,6 +2437,8 @@ def main():
     scenario_lid_reaches_the_line(core)
     scenario_trial_cut(core)
     scenario_seam_lands_on_the_line(core)
+    scenario_parts_can_be_cut_again(core)
+    scenario_a_failed_cut_stays_put(core)
     scenario_line_hugs_surface(core)
     scenario_cap_preview(core)
     scenario_cut_object_shows_the_lid(core)

@@ -90,6 +90,13 @@ def _work_object(obj, rings, normals, height, scene):
     bm.transform(source.matrix_world)
     bpy.data.meshes.remove(mesh)
 
+    # A part cut once already carries this tag, and asking for a second layer
+    # of the same name gets one under a different name — leaving the stale one
+    # to be read instead, every face reading 0, the band never told apart from
+    # the model, and the cut quietly doing nothing. Clear it out first.
+    stale = bm.faces.layers.int.get(BAND_TAG)
+    if stale is not None:
+        bm.faces.layers.int.remove(stale)
     layer = bm.faces.layers.int.new(BAND_TAG)
     for face in bm.faces:
         face[layer] = 0
@@ -157,11 +164,13 @@ def _regions(bm, layer, seam):
 
 
 def _cut_surface(obj, rings, normals, height, scene):
-    """Cut the object's faces along the lines. Returns (bmesh, layer, seam).
+    """Cut the object's faces along the lines.
 
-    None if the bands did not leave closed seams parting the faces in two or
-    more — which is the whole test, and it is exact: a seam either closes or
-    it does not.
+    Returns ((bmesh, layer, seam), loose ends). The first is None unless the
+    bands left closed seams parting the faces in two or more — which is the
+    whole test, and it is exact: a seam either closes or it does not. The
+    loose ends are where it did not, in world space, which is exactly where
+    the line needs moving.
     """
     work = _work_object(obj, rings, normals, height, scene)
     view_layer = bpy.context.view_layer
@@ -176,7 +185,7 @@ def _cut_surface(obj, rings, normals, height, scene):
         bpy.ops.mesh.intersect(mode='SELECT_UNSELECT', separate_mode='NONE',
                                solver='EXACT')
     except RuntimeError:
-        return None
+        return None, []
     finally:
         if work.mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
@@ -194,14 +203,15 @@ def _cut_surface(obj, rings, normals, height, scene):
     for edge in seam:
         for vert in edge.verts:
             degree[vert] = degree.get(vert, 0) + 1
-    if not seam or any(count != 2 for count in degree.values()):
+    loose = [vert.co.copy() for vert, count in degree.items() if count != 2]
+    if not seam or loose:
         bm.free()
-        return None  # the seam is in pieces: the band missed a crease
+        return None, loose  # the seam is in pieces: the band missed a crease
 
     if len(_regions(bm, layer, seam)) < 2:
         bm.free()
-        return None  # the line does not ring-fence anything on this part
-    return bm, layer, seam
+        return None, []  # the line does not ring-fence anything on this part
+    return (bm, layer, seam), []
 
 
 def _boundary_loops(bm):
@@ -639,24 +649,45 @@ def _part_and_cap(bm, layer, seam, normal, scene, collection, settle=None):
 
     pieces = core.split_loose(whole)
     _cap_all(pieces, normal, settle)
+    _drop_tag(pieces)
     return pieces
+
+
+def _drop_tag(pieces):
+    """Take the band's marking off the finished parts.
+
+    A part is a model in its own right and can be cut again; leaving the tag
+    on it would have the next cut read this one's markings.
+    """
+    for piece in pieces:
+        marking = piece.data.attributes.get(BAND_TAG)
+        if marking is not None:
+            piece.data.attributes.remove(marking)
 
 
 def cut_object(obj, rings, normals, normal, scene, collection=None,
                settle=None):
     """Sever `obj` along the ring. Returns (pieces, problem).
 
-    `pieces` is what it fell into when it worked and None when it did not;
-    the object itself is left untouched either way.
+    Returns (pieces, problem, spots). `pieces` is what it fell into when it
+    worked and None when it did not; the object itself is left untouched
+    either way. `spots` are the places along the line the cut could not be
+    carried through — world positions, for marking on the model.
     """
     collection = collection or scene.collection
+    spots = []
     for height in BAND_LADDER:
         try:
-            found = _cut_surface(obj, rings, normals,
-                                 core.bbox_diagonal(obj) * height, scene)
+            found, loose = _cut_surface(obj, rings, normals,
+                                        core.bbox_diagonal(obj) * height,
+                                        scene)
         except Exception:
-            found = None
+            found, loose = None, []
         if found is None:
+            # Keep the closest thing to a working cut any rung managed, since
+            # that is the most useful account of where the trouble is.
+            if loose and (not spots or len(loose) < len(spots)):
+                spots = loose
             continue
         bm, layer, seam = found
         try:
@@ -669,11 +700,10 @@ def cut_object(obj, rings, normals, normal, scene, collection=None,
         # gets another go, taller.
         if len(pieces) >= 2 and all(core.mesh_issues(p) == (0, 0)
                                     for p in pieces):
-            return pieces, None
+            return pieces, None, []
         for piece in pieces:
             core.remove_object(piece)
-    return None, ("the line could not be cut cleanly into the model's "
-                  "surface here")
+    return None, "the line could not be cut into the model's surface", spots
 
 
 def line_rings(cut, target):

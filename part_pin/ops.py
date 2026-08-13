@@ -493,6 +493,13 @@ class PARTPIN_OT_create_parts(bpy.types.Operator):
         for f in failures:
             self.report({'ERROR'}, f)
 
+        if not parts:
+            # Nothing was made, so nothing is put away. The cuts stay where
+            # they are, visible and editable, with the model still showing —
+            # there is a line to fix, and it has to be there to fix it.
+            _select_only(context, [c for c in cuts])
+            return {'CANCELLED'}
+
         if s.keep_original:
             core.hide_drafts(scene, True)
         else:
@@ -501,9 +508,8 @@ class PARTPIN_OT_create_parts(bpy.types.Operator):
                     core.remove_object(conn)
                 core.remove_object(cut)
 
-        if parts:
-            s.parts_collection = parts[0].users_collection[0]
-            _select_only(context, parts)
+        s.parts_collection = parts[0].users_collection[0]
+        _select_only(context, parts)
         self.report({'INFO'},
                     f"Created {len(parts)} part(s) with {applied} connector(s)")
         return {'FINISHED'}

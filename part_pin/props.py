@@ -33,7 +33,10 @@ EXPORT_FORMATS = [
 
 
 def _target_poll(self, obj):
-    return obj.type == 'MESH' and not obj.pp_role
+    # Parts count as models. Cutting a part again is the ordinary way to get
+    # a model down to a printable size, and leaving them out of the list left
+    # the only way of doing it being to clear the role by hand.
+    return obj.type == 'MESH' and obj.pp_role in ("", 'PART')
 
 
 def _custom_poll(self, obj):

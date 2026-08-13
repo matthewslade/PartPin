@@ -91,7 +91,12 @@ not.
 
 | Mark | Meaning | What to do |
 | --- | --- | --- |
+| **Red** | The last attempt at this cut could not get through the surface there | Move the line off the crease, or take it a shorter way round |
 | **Yellow** | The line has come off the model there | Drag those points back onto it |
+
+Red marks come from actually trying the cut — pressing **T**, or Create Parts
+failing — so they show where it really got stuck rather than where it might.
+They clear the moment the cut works.
 
 Press **T** at any point for a straight answer: *"This cut separates into 2
 parts"*, or what is stopping it.
@@ -113,6 +118,9 @@ objects: move, rotate, scale, duplicate (Shift+D) or delete them.
 - **Snap Connectors** re-seats pins after you reshape a cut.
 
 ## 5. Create Parts, and export
+
+A finished part is a model in its own right: pick it in **Model** and cut it
+again to get a large piece down to something the printer will take.
 
 **Create Parts** applies every enabled cut, unions the pins into their parts
 and subtracts clearance-fattened sockets from the mating parts. The parts land
@@ -168,10 +176,14 @@ binary is usually `/Applications/Blender.app/Contents/MacOS/Blender`.
 
 ## If a cut will not separate
 
-Press **T** first — it makes the cut on a copy and tells you what happened,
-which beats guessing.
+Nothing is taken away when a cut fails: the model stays visible, the cut stays
+where it is, and the spots it could not get through are marked in red on the
+model. Open **Edit Cut on Surface** to see them and drag the line off them.
 
-If the line itself cannot be cut into the surface, **untick "Cut Inside Line
+Press **T** at any point — it makes the cut on a copy and tells you what
+happened, which beats guessing.
+
+If the line still cannot be cut into the surface, **untick "Cut Inside Line
 Only"**. That cuts along your drawn surface all the way through the model,
 using a cutter that is a height over a plane extruded into a solid, so it
 always produces two clean, closed parts. It takes more of the model with the

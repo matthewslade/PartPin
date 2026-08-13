@@ -355,30 +355,15 @@ def line_rings(cut, target):
     return mesh_cut.line_rings(cut, target)
 
 
-def failure_reason(cut, target=None):
-    """Why a cut that spans its line did not separate anything, and where."""
-    joined, holes = [], []
-    if target is not None:
-        try:
-            joined, holes = find_join_hints(cut, target)
-        except Exception:
-            joined, holes = [], []
-    JOIN_HINTS[cut.name] = {'joined': joined, 'holes': holes}
-    look = (" Open Edit Cut on Surface and press T to try the cut there, "
-            "which marks these on the model")
-    if joined:
-        return (f"nothing came away — the cut is still buried in the model at "
-                f"{len(joined)} spots along the line, so material wraps round "
-                "it there. Move the line to where the piece is clear, or raise "
-                "Undercut to reach through." + look)
-    if holes:
-        return (f"nothing came away — the cut surface leaves the model in "
-                f"{len(holes)} places, so the line encloses space rather than "
-                "solid material and the two sides join around it. Draw the "
-                "line closer round the piece." + look)
-    return ("nothing came away — the piece must still be joined to the model "
-            "somewhere the line does not cross. Slide the line along the "
-            "piece to where it is clear of what it is buried in")
+def failure_reason(spots):
+    """Why a cut did not separate anything, given where it got stuck."""
+    if spots:
+        return (f"nothing came away — the line could not be cut into the "
+                f"model's surface at {len(spots)} spot(s) along it. Open Edit "
+                "Cut on Surface: they are marked in red on the model. Move the "
+                "line off the crease there, or take it a shorter way round")
+    return ("nothing came away — this line does not ring-fence a piece of the "
+            "model. Draw it right round the part you want removed")
 
 
 def cut_line_problem(cut, minimum_roundness=0.02):
@@ -916,9 +901,19 @@ def cap_sheet(cut, target, usable, ring=96, relax=18, cuts=2,
     return bm, None
 
 
-# Where a cut was found to be still joined, per cut name, for the editor to
-# show. Transient: recomputed whenever it is wanted.
-JOIN_HINTS = {}
+# Where a cut was last found to be uncuttable, per cut name, so the editor can
+# mark it. Written whenever a cut is actually tried — by T in the editor, and
+# by Create Parts when it fails — so the marks always describe the last real
+# attempt rather than a guess. Transient.
+STUCK_AT = {}
+
+
+def remember_stuck(cut, spots):
+    """Record where a cut got stuck, for the editor to mark."""
+    if spots:
+        STUCK_AT[cut.name] = list(spots)
+    else:
+        STUCK_AT.pop(cut.name, None)
 
 
 # What an inspection can find wrong with a cut, and what to do about it.
@@ -931,9 +926,12 @@ JOIN_HINTS = {}
 # line encloses. Those three could only ever fire on nothing, or worse, on a
 # cut that works — which is how they lost the user's trust. They are gone.
 ADRIFT = 'ADRIFT'        # the line has left the model's surface
+STUCK = 'STUCK'          # the cut could not be carried through the surface
 
 TROUBLE = {
     ADRIFT: "the line has come off the model here — drag these points back on",
+    STUCK: ("the cut could not be carried through the surface here — move the "
+            "line off the crease, or take it a shorter way round"),
 }
 
 
@@ -947,7 +945,7 @@ def inspect_cut(cut, target):
 
     Returns {kind: [world positions]}.
     """
-    found = {ADRIFT: []}
+    found = {ADRIFT: [], STUCK: list(STUCK_AT.get(cut.name, ()))}
     _usable, problem, _warning = loop_quality(cut, min_alignment=0.0)
     if problem is not None:
         return found
@@ -1105,22 +1103,23 @@ def trial_cut(cut, target, scene=None):
     what falls out, throws the copy away, and only looks for reasons when the
     answer is that nothing came away.
 
-    Returns (pieces, joined_at, left_model).
+    Returns (pieces, spots) — how many pieces it fell into, and where the cut
+    could not be carried through if it did not.
     """
     from . import mesh_cut  # local import: mesh_cut builds on this module
 
     scene = scene or bpy.context.scene
     rings, normals, normal, settle = mesh_cut.line_rings(cut, target)
     if rings is None:
-        return 0, [], []
+        STUCK_AT.pop(cut.name, None)
+        return 0, []
 
     trial = core.duplicate_object(target, "PartPin_Trial", scene.collection)
     trial.hide_render = True
-    pieces = 1
+    pieces, spots = 1, []
     try:
-        cut_pieces, _problem = mesh_cut.cut_object(trial, rings, normals,
-                                                  normal, scene,
-                                                  settle=settle)
+        cut_pieces, _problem, spots = mesh_cut.cut_object(
+            trial, rings, normals, normal, scene, settle=settle)
         if cut_pieces is not None:
             pieces = len(cut_pieces)
             for part in cut_pieces:
@@ -1131,12 +1130,9 @@ def trial_cut(cut, target, scene=None):
         core.remove_object(trial)
 
     if pieces >= 2:
-        JOIN_HINTS[cut.name] = {'joined': [], 'holes': [], 'tangled': False}
-        return pieces, [], []
-    joined, holes = find_join_hints(cut, target)
-    JOIN_HINTS[cut.name] = {'joined': joined, 'holes': holes,
-                            'tangled': False}
-    return pieces, joined, holes
+        spots = []
+    remember_stuck(cut, spots)
+    return pieces, spots
 
 
 def cap_preview_tris(cut, target, ring=56, relax=10, cuts=1, lift=0.0):
@@ -1195,7 +1191,6 @@ def build_cap_slab(cut, target, scene=None, ring=96, relax=18):
     stuck = []
     bm, problem = cap_sheet(cut, target, usable, ring=ring, relax=relax,
                             stuck=stuck)
-    JOIN_HINTS[cut.name] = {'joined': _thin(stuck), 'holes': []}
     if bm is None:
         return None, problem, warning
 
