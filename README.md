@@ -180,6 +180,13 @@ not.
 The tighter, line-only cut is the better result when it works, and it is not
 yet reliable on dense sculpts: see the limits below.
 
+## Working on this
+
+The localized cut is being rebuilt — see
+[docs/NEXT-mesh-surgery-cutter.md](docs/NEXT-mesh-surgery-cutter.md) for why the
+current one is not sound on dense sculpts, what replaces it, what has already
+been tried and rejected, and the bar the replacement has to clear.
+
 ## Limits worth knowing
 
 - **The cut surface can fold onto itself** on an awkward line, and the exact
