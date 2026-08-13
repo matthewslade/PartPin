@@ -19,7 +19,6 @@ STROKE_COLOR = (1.0, 0.62, 0.16, 1.0)
 STROKE_COLOR_HIDDEN = (1.0, 0.62, 0.16, 0.25)
 START_COLOR = (0.35, 1.0, 0.45, 1.0)
 START_COLOR_READY = (1.0, 0.95, 0.35, 1.0)
-GAP_COLOR = (0.55, 0.55, 0.6, 1.0)
 
 # How close to the first point counts as closing the loop.
 CLOSE_RADIUS_PX = 22
@@ -27,9 +26,32 @@ CLOSE_RADIUS_PX = 22
 MIN_STEP = 0.004
 
 STATUS = ("Draw the perimeter on the model    "
-          "Release to orbit, then carry on    "
+          "Release to orbit, then carry on — the line joins up    "
           "Close at the green dot, or Enter    "
           "Backspace: undo stroke    Esc: cancel")
+
+
+def bridge_points(target, start, end, step):
+    """Points along the model from one drawn stretch to the next.
+
+    Letting go to orbit and drawing again leaves a gap. Joining the two ends
+    with a straight line in space would leave the perimeter cutting through
+    the model, so the join is walked across the surface instead — which on a
+    cube means following its faces round the corner.
+    """
+    model = surface.evaluated(target)
+    inverse = model.matrix_world.inverted()
+    distance = (end - start).length
+    if distance < step * 1.5:
+        return []
+    steps = min(max(int(distance / step), 2), 400)
+    walked = []
+    for k in range(1, steps):
+        point = start.lerp(end, k / steps)
+        ok, near, _normal, _index = model.closest_point_on_mesh(
+            inverse @ point)
+        walked.append(model.matrix_world @ near if ok else point)
+    return walked
 
 
 def _draw_polyline(points, color, width, depth_test):
@@ -163,6 +185,17 @@ class PARTPIN_OT_draw_cut_line(bpy.types.Operator):
         self.drawn[-1].append(self._lifted(world))
         return True
 
+    def _join_up(self, mouse):
+        """Carry the line across the gap left by letting go, along the model."""
+        previous = [stroke for stroke in self.strokes[:-1] if stroke]
+        world = self._surface_hit(mouse)
+        if not previous or world is None:
+            return
+        for point in bridge_points(self.target, previous[-1][-1], world,
+                                   self.min_step):
+            self.strokes[-1].append(point)
+            self.drawn[-1].append(self._lifted(point))
+
     def _lifted(self, world):
         model = surface.evaluated(self.target)
         ok, near, normal, _index = model.closest_point_on_mesh(
@@ -218,6 +251,7 @@ class PARTPIN_OT_draw_cut_line(bpy.types.Operator):
                 if self.strokes[-1]:
                     self.strokes.append([])
                     self.drawn.append([])
+                    self._join_up(mouse)
                 self._add(mouse)
                 return {'RUNNING_MODAL'}
             if event.value == 'RELEASE':
@@ -289,12 +323,6 @@ class PARTPIN_OT_draw_cut_line(bpy.types.Operator):
                     continue
                 _draw_polyline(stroke, STROKE_COLOR_HIDDEN, 2.0, 'NONE')
                 _draw_polyline(stroke, STROKE_COLOR, 3.0, 'LESS_EQUAL')
-
-            # Dashes across the gaps, so a perimeter drawn in stretches
-            # still reads as one line.
-            filled = [s for s in self.drawn if s]
-            for before, after in zip(filled, filled[1:]):
-                _draw_polyline([before[-1], after[0]], GAP_COLOR, 1.5, 'NONE')
 
             points = [p for stroke in self.drawn for p in stroke]
             if points:

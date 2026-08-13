@@ -1794,13 +1794,56 @@ def convert_to_surface(context, cut, target, per_loop=16):
     return cut, None
 
 
+def simplify_ring(points, tolerance):
+    """Thin a closed ring, keeping the corners and dropping what lies along a
+    straight run (Douglas-Peucker). Sampling a drawn line by length alone puts
+    points at even spacing and none on the corners, and a cut line that misses
+    a corner cuts across it."""
+    count = len(points)
+    if count < 4:
+        return list(points)
+
+    def furthest(start, end):
+        """Index between start and end furthest from the line joining them."""
+        first, last = points[start], points[end]
+        span = last - first
+        length = span.length
+        worst, worst_at = -1.0, -1
+        for i in range(start + 1, end):
+            offset = points[i] - first
+            if length < 1e-12:
+                distance = offset.length
+            else:
+                along = offset.dot(span) / (length * length)
+                distance = (offset - span * along).length
+            if distance > worst:
+                worst, worst_at = distance, i
+        return worst, worst_at
+
+    def walk(start, end, keep):
+        worst, worst_at = furthest(start, end)
+        if worst_at < 0 or worst <= tolerance:
+            return
+        walk(start, worst_at, keep)
+        keep.add(worst_at)
+        walk(worst_at, end, keep)
+
+    # Split the ring at two far-apart points so each half is an open chain.
+    half = count // 2
+    keep = {0, half}
+    walk(0, half, keep)
+    walk(half, count - 1, keep)
+    keep.add(count - 1)
+    return [points[i] for i in sorted(keep)]
+
+
 def stroke_to_loop(target, stroke, per_loop=16):
     """Turn a drawn stroke into a closed ring of control points.
 
     The stroke arrives as world points already on the model (each one a
-    ray-cast hit). It is closed, evened out along its length and pulled back
-    onto the surface, so every control point starts exactly where it was
-    drawn — and there are few enough of them to drag about afterwards.
+    ray-cast hit). Corners are kept — a point lands on each of them — and the
+    straight runs between are filled in evenly, so the line can be dragged
+    about without having lost the shape that was drawn.
     """
     points = []
     for point in stroke:
@@ -1810,9 +1853,28 @@ def stroke_to_loop(target, stroke, per_loop=16):
         return []
     if (points[0] - points[-1]).length < 1e-9:
         points.pop()
-    count = max(int(per_loop), 6)
-    return [project_to_surface(target, p)
-            for p in resample_loop(points, count, cyclic=True)]
+    if len(points) < 3:
+        return []
+
+    wanted = max(int(per_loop), 6)
+    diagonal = core.bbox_diagonal(target)
+    tolerance = diagonal * 0.004
+    corners = simplify_ring(points, tolerance)
+    # A scribble would otherwise keep every wobble as a corner.
+    while len(corners) > wanted * 2 and tolerance < diagonal:
+        tolerance *= 1.7
+        corners = simplify_ring(points, tolerance)
+
+    # Fill the straight runs so no span is much longer than the rest.
+    span_target = max(loop_length(corners) / wanted, diagonal * 1e-4)
+    filled = []
+    for i, a in enumerate(corners):
+        b = corners[(i + 1) % len(corners)]
+        filled.append(a)
+        steps = int((b - a).length / span_target)
+        for k in range(1, steps):
+            filled.append(a.lerp(b, k / steps))
+    return [project_to_surface(target, p) for p in filled]
 
 
 def cut_from_stroke(context, target, stroke, per_loop=16, name="Drawn Cut"):

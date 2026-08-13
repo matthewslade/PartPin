@@ -35,11 +35,16 @@ Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
    | Action | Result |
    | --- | --- |
    | Hold left mouse and draw | Lay the line onto the model's surface |
-   | Let go, orbit, draw again | Carry the perimeter round the far side — the stretches join up |
+   | Let go, orbit, draw again | Carry the perimeter round the far side — the line joins up across the model, following its faces |
    | Close at the green dot | Finish the loop and go straight to adjusting it |
    | Enter | Close the loop from wherever you are |
    | Backspace | Undo the last stretch |
    | Esc | Cancel |
+
+   Corners are kept: a point lands on each corner of what you draw, and the
+   straight runs between get evenly spaced points. So a line drawn round a
+   box keeps its corners rather than being rounded off, which would cut
+   across them.
 
    The green dot marks where you started and turns yellow when you are
    close enough to close on it. When the loop closes it becomes an

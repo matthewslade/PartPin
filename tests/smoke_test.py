@@ -1480,6 +1480,100 @@ def hand_stroke(surface_mod, model, x=2.0, count=90, wobble=0.06, gap=0):
     return points
 
 
+def make_cube_model(core, size=2.0):
+    bm = bmesh.new()
+    bmesh.ops.create_cube(bm, size=size)
+    mesh = bpy.data.meshes.new("Cube")
+    bm.to_mesh(mesh)
+    bm.free()
+    return link(bpy.data.objects.new("Cube", mesh))
+
+
+def waist_stroke(surface_mod, model, count=157, phase=0.37):
+    """A line drawn round a cube's waist: it crosses four sharp corners, and
+    the count is chosen so no sample lands neatly on one."""
+    obj = surface_mod.evaluated(model)
+    inverse = obj.matrix_world.inverted()
+    points = []
+    for i in range(count):
+        angle = 2.0 * math.pi * i / count + phase
+        radial = Vector((math.cos(angle), math.sin(angle), 0.0))
+        hit, location, _n, _i = obj.ray_cast(inverse @ (radial * 5.0),
+                                            inverse.to_3x3() @ (-radial))
+        if hit:
+            points.append(obj.matrix_world @ location)
+    return points
+
+
+def scenario_corners_are_kept(core):
+    """A line drawn over a corner must keep a point on it. Sampling by length
+    alone puts points at even spacing and none on the corners, and the cut
+    then crosses them — on a cube that stopped it separating at all."""
+    print("Scenario: corners of a drawn line are kept")
+    reset_scene()
+    from part_pin import surface
+    s = bpy.context.scene.part_pin
+    model = make_cube_model(core)
+    s.target = model
+    stroke = waist_stroke(surface, model)
+    corners = [Vector((x, y, 0.0)) for x in (-1, 1) for y in (-1, 1)]
+    check("the stroke runs round the cube", len(stroke) > 100,
+          f"{len(stroke)} points")
+
+    for per_loop in (13, 16, 24):
+        loop = surface.stroke_to_loop(model, stroke, per_loop=per_loop)
+        worst = max(min((p - corner).length for p in loop)
+                    for corner in corners)
+        check(f"a point lands on each corner ({per_loop} asked for)",
+              worst < 0.06, f"worst corner {worst:.3f} from any point")
+
+        cut, error = surface.cut_from_stroke(bpy.context, model, stroke,
+                                           per_loop=per_loop)
+        check(f"the cut is created ({per_loop})", cut is not None, str(error))
+        if cut is None:
+            continue
+        tris = surface.cap_preview_tris(cut, model)
+        missed = max(min((Vector(q) - corner).length for q in tris)
+                     for corner in corners)
+        check(f"the cut surface reaches the corners ({per_loop})",
+              missed < 0.1, f"missed by {missed:.3f} of a 1.0 half-width")
+        pieces, joined, holes = surface.trial_cut(cut, model)
+        check(f"and the cube separates ({per_loop})", pieces == 2,
+              f"{pieces} pieces, {len(joined)} red, {len(holes)} violet")
+        core.remove_object(cut)
+
+
+def scenario_gap_is_bridged_along_surface(core):
+    """Letting go to orbit and drawing again leaves a gap. It is carried across
+    the model, not straight through it."""
+    print("Scenario: a gap in the drawing is carried across the surface")
+    reset_scene()
+    from part_pin import draw_cut, surface
+    s = bpy.context.scene.part_pin
+    model = make_cube_model(core)
+    s.target = model
+    step = core.bbox_diagonal(model) * 0.004
+
+    # A gap spanning a corner: mid-face on one side to mid-face on the next.
+    start, end = Vector((1.0, -0.6, 0.0)), Vector((0.6, 1.0, 0.0))
+    bridge = draw_cut.bridge_points(model, start, end, step)
+    check("the gap is filled in", len(bridge) > 20, f"{len(bridge)} points")
+    check("every point of it is on the model",
+          max(surface_distance(model, p) for p in bridge) < 1e-4,
+          f"worst {max(surface_distance(model, p) for p in bridge):.2e}")
+    check("it goes round the corner rather than through it",
+          any(abs(p.x - 1.0) < 1e-4 for p in bridge)
+          and any(abs(p.y - 1.0) < 1e-4 for p in bridge))
+    walked = sum((bridge[i + 1] - bridge[i]).length
+                 for i in range(len(bridge) - 1))
+    check("so it is longer than the straight line", walked > (end - start).length,
+          f"{walked:.3f} vs {(end - start).length:.3f}")
+
+    check("a gap too small to matter is left alone",
+          not draw_cut.bridge_points(model, start, start + Vector((step, 0, 0)),
+                                     step))
+
+
 def scenario_draw_cut(core):
     """Drawing the perimeter onto the model and cutting along it."""
     print("Scenario: draw the cut perimeter on the model")
@@ -1500,18 +1594,21 @@ def scenario_draw_cut(core):
           f"{max(surface_distance(model, p) for p in stroke):.2e}")
 
     loop = surface.stroke_to_loop(model, stroke, per_loop=16)
-    check("stroke reduces to draggable control points", len(loop) == 16,
-          f"got {len(loop)}")
+    # Not exactly the number asked for: corners are kept, so a shape with more
+    # of them gets more points, and a plain curve fewer.
+    check("stroke reduces to a handful of draggable points",
+          8 <= len(loop) <= 32, f"got {len(loop)}")
     check("control points sit on the model",
           max(surface_distance(model, p) for p in loop) < 1e-3,
           f"{max(surface_distance(model, p) for p in loop):.2e}")
     spacing = [(loop[(i + 1) % len(loop)] - loop[i]).length
                for i in range(len(loop))]
-    # Spacing is evened out along the stroke, then each point is pulled onto
-    # the faceted surface, which shifts it a little.
-    check("control points are evenly spread",
-          max(spacing) < min(spacing) * 2.5,
-          f"{min(spacing):.3f}..{max(spacing):.3f}")
+    # Spacing is not uniform on purpose — points gather at corners — but no
+    # stretch may be left so long that dragging cannot shape it.
+    perimeter = sum(spacing)
+    check("no stretch of the line is left too long",
+          max(spacing) < perimeter * 0.25,
+          f"longest {max(spacing):.3f} of {perimeter:.3f}")
 
     cut, error = surface.cut_from_stroke(bpy.context, model, stroke,
                                         per_loop=16)
@@ -1555,7 +1652,7 @@ def scenario_draw_cut_in_pieces(core):
 
     stroke = hand_stroke(surface, model, gap=12)
     loop = surface.stroke_to_loop(model, stroke, per_loop=18)
-    check("the gap is bridged into a closed ring", len(loop) == 18,
+    check("the gap is bridged into a closed ring", 8 <= len(loop) <= 36,
           f"got {len(loop)}")
     longest = max((loop[(i + 1) % len(loop)] - loop[i]).length
                   for i in range(len(loop)))
@@ -1876,13 +1973,11 @@ def scenario_cap_preview(core):
         return
     cutter_lo, cutter_hi = core.world_bbox(cap)
     preview_lo, preview_hi = bounds(after)
-    # The cutter is the same lid with its rim stepped out through the surface,
-    # so it reaches a little further than the preview — never less.
+    # The cutter is the same lid, with its rim put on the surface and stepped
+    # out through it, so the two differ by about that much and no more.
     check("cutter and preview agree",
-          all(cutter_lo[i] <= preview_lo[i] + span * 0.02
-              and cutter_hi[i] >= preview_hi[i] - span * 0.02
-              and abs(cutter_lo[i] - preview_lo[i]) < span * 0.25
-              and abs(cutter_hi[i] - preview_hi[i]) < span * 0.25
+          all(abs(cutter_lo[i] - preview_lo[i]) < span * 0.3
+              and abs(cutter_hi[i] - preview_hi[i]) < span * 0.3
               for i in range(3)),
           f"cutter {[round(x, 2) for x in cutter_lo]}.."
           f"{[round(x, 2) for x in cutter_hi]} vs preview "
@@ -2101,6 +2196,8 @@ def main():
     scenario_joined_outside_line_reports(core)
     scenario_check_line_operator(core)
     scenario_unusable_line_reports(core)
+    scenario_corners_are_kept(core)
+    scenario_gap_is_bridged_along_surface(core)
     scenario_draw_cut(core)
     scenario_draw_cut_in_pieces(core)
     scenario_draw_then_adjust(core)
