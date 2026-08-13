@@ -247,6 +247,26 @@ def register():
 
     # Surface-cut shape data (registered after PartPinControlPoint exists).
     bpy.types.Object.pp_points = CollectionProperty(type=PartPinControlPoint)
+    bpy.types.Object.pp_local = BoolProperty(
+        name="Cut Inside Line Only",
+        description=(
+            "Cut only the region ring-fenced by this cut's line, leaving "
+            "the rest of the model whole. Turn off to let the cut surface "
+            "carry on and split everything it meets"
+        ),
+        default=True,
+    )
+    bpy.types.Object.pp_margin = FloatProperty(
+        name="Edge Margin",
+        description=(
+            "How far past the cut line the cut reaches, as a fraction of "
+            "the line's size. Just enough to break through the surface — "
+            "raise it if the cut fails to separate the region"
+        ),
+        default=0.05,
+        min=0.001,
+        max=0.5,
+    )
     bpy.types.Object.pp_falloff = FloatProperty(
         name="Falloff",
         description=(
@@ -254,9 +274,9 @@ def register():
             "in multiples of the spacing between points. Low is local and "
             "sharp, high is broad and smooth"
         ),
-        default=2.0,
+        default=1.5,
         min=0.2,
-        max=12.0,
+        max=8.0,
     )
 
 
@@ -269,5 +289,6 @@ def unregister():
     for attr in (
         "pp_role", "pp_cut_kind", "pp_index", "pp_enabled",
         "pp_shape", "pp_clearance", "pp_pin_flip",
+        "pp_local", "pp_margin",
     ):
         delattr(bpy.types.Object, attr)

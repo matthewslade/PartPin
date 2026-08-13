@@ -4,7 +4,7 @@ A surface cut is stored as a **height field over its own local XY plane**:
 the cut object's transform defines the base frame (local Z is the cut
 normal) and a handful of control points, kept in local space, pull the
 surface up and down. The surface interpolates those control points
-exactly (Gaussian RBF) and flattens back to the base plane away from
+exactly (Wendland RBF) and flattens back to the base plane away from
 them.
 
 Storing the cut as a height field h(u, v) — rather than an arbitrary
@@ -25,6 +25,11 @@ from . import core
 
 # Grid used for the viewport preview mesh; the cutter uses a finer one.
 DISPLAY_RES = 24
+
+# Thickness of the severing slab for a localized cut, as a fraction of the
+# model's size. This much material is removed at the seam — 0.02 mm on a
+# 200 mm model, far below anything a printer resolves.
+SEAM_FACTOR = 1e-4
 
 
 def evaluated(obj):
@@ -71,15 +76,21 @@ def order_wire_loops(bm, min_points=3):
                 return chain, True
             chain.append(v)
 
+    # Walk in coordinate order: bmesh elements hash by address, so plain
+    # dict order would start each loop at a different vertex from run to
+    # run and shift the control points around it.
+    ordered = sorted(adj, key=lambda v: (round(v.co.x, 9), round(v.co.y, 9),
+                                         round(v.co.z, 9)))
+
     loops = []
     # Open chains first, so their ends are not consumed mid-walk.
-    for v, edges in adj.items():
-        if len(edges) == 1 and any(e not in used for e in edges):
+    for v in ordered:
+        if len(adj[v]) == 1 and any(e not in used for e in adj[v]):
             chain, cyclic = walk(v)
             if len(chain) >= min_points:
                 loops.append((chain, cyclic))
-    for v, edges in adj.items():
-        if any(e not in used for e in edges):
+    for v in ordered:
+        if any(e not in used for e in adj[v]):
             chain, cyclic = walk(v)
             if len(chain) >= min_points:
                 loops.append((chain, cyclic))
@@ -215,6 +226,18 @@ class HeightField:
         self.nodes = [(p.x, p.y) for p in points]
         self.heights = [p.z for p in points]
         self.radius = self._radius(falloff)
+        # Control points projected onto the model land a hair off the base
+        # plane, so "flat" needs a tolerance — testing for non-zero floats
+        # would treat every unedited cut as deformed.
+        span = 0.0
+        if self.nodes:
+            span = max(max(u for u, _v in self.nodes)
+                       - min(u for u, _v in self.nodes),
+                       max(v for _u, v in self.nodes)
+                       - min(v for _u, v in self.nodes))
+        tolerance = max(span, 1e-12) * 1e-7
+        self._flat = not self.nodes or all(abs(h) <= tolerance
+                                          for h in self.heights)
         self.weights = self._solve()
 
     def _radius(self, falloff):
@@ -231,8 +254,21 @@ class HeightField:
         mean = sum(spacing) / len(spacing) if spacing else 1.0
         return max(mean * max(falloff, 0.05), 1e-9)
 
+    def _kernel(self, distances):
+        """Wendland C² radial basis, evaluated on a numpy array.
+
+        Compactly supported and far better conditioned than a Gaussian: a
+        Gaussian fit through closely spaced points rings badly, and a
+        single dragged point could balloon the surface right out of the
+        model. This one stays local and overshoot-free.
+        """
+        q = distances / self.radius
+        inside = q < 1.0
+        out = (1.0 - q) ** 4 * (4.0 * q + 1.0)
+        return out * inside
+
     def _solve(self):
-        if not self.nodes or not any(self.heights):
+        if self._flat:
             return None  # flat: nothing to solve, eval() short-circuits
         try:
             import numpy as np
@@ -241,7 +277,7 @@ class HeightField:
         P = np.asarray(self.nodes, dtype=float)
         h = np.asarray(self.heights, dtype=float)
         d = np.linalg.norm(P[:, None, :] - P[None, :, :], axis=-1)
-        A = np.exp(-(d / self.radius) ** 2)
+        A = self._kernel(d)
         A += np.eye(len(P)) * 1e-6  # ridge: tolerate coincident points
         try:
             return np.linalg.solve(A, h)
@@ -250,7 +286,7 @@ class HeightField:
 
     @property
     def is_flat(self):
-        return not self.nodes or not any(self.heights)
+        return self._flat
 
     def eval_many(self, uvs):
         """Heights for a list of (u, v) pairs."""
@@ -262,7 +298,7 @@ class HeightField:
         Q = np.asarray(uvs, dtype=float)
         P = np.asarray(self.nodes, dtype=float)
         d = np.linalg.norm(Q[:, None, :] - P[None, :, :], axis=-1)
-        return (np.exp(-(d / self.radius) ** 2) @ self.weights).tolist()
+        return (self._kernel(d) @ self.weights).tolist()
 
     def eval(self, u, v):
         return self.eval_many([(u, v)])[0]
@@ -349,8 +385,7 @@ def _height_grid(cut, target, resolution):
     return us, vs, heights, z_min, z_max
 
 
-def build_display_mesh(cut, target, resolution=DISPLAY_RES):
-    """Replace the cut's mesh with the (open) preview surface."""
+def _full_grid_bm(cut, target, resolution):
     us, vs, heights, _z0, _z1 = _height_grid(cut, target, resolution)
     bm = bmesh.new()
     grid = [[bm.verts.new((us[i], vs[j], heights[i][j]))
@@ -360,6 +395,22 @@ def build_display_mesh(cut, target, resolution=DISPLAY_RES):
             bm.faces.new((grid[i][j], grid[i + 1][j],
                           grid[i + 1][j + 1], grid[i][j + 1]))
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    return bm
+
+
+def build_display_mesh(cut, target, resolution=DISPLAY_RES):
+    """Replace the cut's mesh with the (open) preview surface.
+
+    A localized cut previews only the patch inside its cut line, so the
+    viewport shows what will actually be cut.
+    """
+    patch = None
+    if is_local(cut):
+        patch = patch_grid(cut, target, resolution)
+    if patch is not None:
+        bm = _patch_bm(patch, thickness=0.0)
+    else:
+        bm = _full_grid_bm(cut, target, resolution)
 
     mesh = bpy.data.meshes.new("PartPin_CutSurface")
     bm.to_mesh(mesh)
@@ -369,6 +420,259 @@ def build_display_mesh(cut, target, resolution=DISPLAY_RES):
     if old is not None and old.users == 0:
         bpy.data.meshes.remove(old)
     return mesh
+
+
+# ----------------------------------------------------------------------
+# Localized cuts: sever only the region ring-fenced by the cut line
+# ----------------------------------------------------------------------
+
+def is_local(cut):
+    return (cut.pp_cut_kind == 'SURFACE' and cut.pp_local
+            and len(cut.pp_points) >= 3)
+
+
+def loop_polygons(cut):
+    """The cut lines as 2D polygons in the cut's own plane."""
+    return [[(p.x, p.y) for p in loop] for loop in control_loops(cut)]
+
+
+def _in_polygon(u, v, poly):
+    """Ray-crossing point-in-polygon test."""
+    inside = False
+    count = len(poly)
+    for i in range(count):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % count]
+        if (y1 > v) != (y2 > v):
+            crossing = x1 + (v - y1) * (x2 - x1) / (y2 - y1)
+            if u < crossing:
+                inside = not inside
+    return inside
+
+
+def _distance_to_loop(u, v, poly):
+    best = float('inf')
+    count = len(poly)
+    for i in range(count):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % count]
+        dx, dy = x2 - x1, y2 - y1
+        length = dx * dx + dy * dy
+        t = 0.0 if length < 1e-18 else max(
+            0.0, min(1.0, ((u - x1) * dx + (v - y1) * dy) / length))
+        best = min(best, ((u - x1 - dx * t) ** 2
+                          + (v - y1 - dy * t) ** 2) ** 0.5)
+    return best
+
+
+def inside_loops(u, v, polys, margin=0.0):
+    """Inside any cut line, or within `margin` of one."""
+    for poly in polys:
+        if _in_polygon(u, v, poly):
+            return True
+        if margin > 0.0 and _distance_to_loop(u, v, poly) <= margin:
+            return True
+    return False
+
+
+def loop_inset(u, v, polys):
+    """How far inside the nearest cut line a point is (negative = outside)."""
+    best = -float('inf')
+    for poly in polys:
+        distance = _distance_to_loop(u, v, poly)
+        signed = distance if _in_polygon(u, v, poly) else -distance
+        best = max(best, signed)
+    return best
+
+
+def _label_regions(mask, n):
+    """Label 4-connected True cells; returns (labels, count)."""
+    labels = [[-1] * n for _ in range(n)]
+    count = 0
+    for si in range(n):
+        for sj in range(n):
+            if not mask[si][sj] or labels[si][sj] >= 0:
+                continue
+            stack = [(si, sj)]
+            labels[si][sj] = count
+            while stack:
+                i, j = stack.pop()
+                for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    a, b = i + di, j + dj
+                    if 0 <= a < n and 0 <= b < n and mask[a][b] \
+                            and labels[a][b] < 0:
+                        labels[a][b] = count
+                        stack.append((a, b))
+            count += 1
+    return labels, count
+
+
+def _dilate(mask, n, steps):
+    for _ in range(max(int(steps), 0)):
+        grown = [row[:] for row in mask]
+        for i in range(n):
+            for j in range(n):
+                if not mask[i][j]:
+                    continue
+                for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    a, b = i + di, j + dj
+                    if 0 <= a < n and 0 <= b < n:
+                        grown[a][b] = True
+        mask = grown
+    return mask
+
+
+def patch_grid(cut, target, resolution, margin=None):
+    """Grid over the cut, with a mask of the cells to actually cut.
+
+    The mask is *where the cut surface runs through the model*, restricted
+    to the region(s) enclosed by this cut's lines, then grown a little so
+    the patch breaks out through the surface all the way round. Deriving
+    it from real inside/outside tests rather than from the cut line's
+    outline keeps it correct however far the reshaped surface has moved.
+    """
+    polys = loop_polygons(cut)
+    if not polys:
+        return None
+    field = field_for(cut)
+    us = [u for poly in polys for u, _v in poly]
+    vs = [v for poly in polys for _u, v in poly]
+    span = max(max(us) - min(us), max(vs) - min(vs), 1e-9)
+    factor = cut.pp_margin if margin is None else margin
+    grow = span * max(factor, 1e-4)
+    pad = max(grow * 3.0, field.radius if not field.is_flat else grow)
+    u0, u1 = min(us) - pad, max(us) + pad
+    v0, v1 = min(vs) - pad, max(vs) + pad
+
+    n = max(int(resolution), 8)
+    du, dv = (u1 - u0) / n, (v1 - v0) / n
+    centres = [(u0 + du * (i + 0.5), v0 + dv * (j + 0.5))
+               for i in range(n) for j in range(n)]
+    centre_h = field.eval_many(centres)
+    matrix = cut.matrix_world
+
+    inside = [[False] * n for _ in range(n)]
+    for index, (u, v) in enumerate(centres):
+        point = matrix @ Vector((u, v, centre_h[index]))
+        if core.point_inside(target, point):
+            inside[index // n][index % n] = True
+
+    keep = [[False] * n for _ in range(n)]
+    labels, count = _label_regions(inside, n)
+    if count:
+        # Keep only the region(s) the cut lines enclose.
+        wanted = set()
+        for i in range(n):
+            for j in range(n):
+                if labels[i][j] < 0:
+                    continue
+                u, v = centres[i * n + j]
+                if inside_loops(u, v, polys, grow):
+                    wanted.add(labels[i][j])
+        if wanted:
+            for i in range(n):
+                for j in range(n):
+                    if labels[i][j] in wanted:
+                        keep[i][j] = True
+
+    if not any(any(row) for row in keep):
+        # The surface never enters the model inside its own cut lines;
+        # fall back to the outline so the user still gets a cut attempt.
+        keep = [[inside_loops(*centres[i * n + j], polys, grow)
+                 for j in range(n)] for i in range(n)]
+        if not any(any(row) for row in keep):
+            return None
+
+    cell = max(min(du, dv), 1e-12)
+    keep = _dilate(keep, n, max(1, int(grow / cell + 0.5)))
+
+    nodes = [(u0 + du * i, v0 + dv * j)
+             for i in range(n + 1) for j in range(n + 1)]
+    flat = field.eval_many(nodes)
+    heights = [[flat[i * (n + 1) + j] for j in range(n + 1)]
+               for i in range(n + 1)]
+    thickness = max(core.bbox_diagonal(target) * SEAM_FACTOR, 1e-9)
+    return {'u0': u0, 'v0': v0, 'du': du, 'dv': dv, 'n': n,
+            'keep': keep, 'heights': heights, 'thickness': thickness}
+
+
+def _patch_bm(patch, thickness=None):
+    """Mesh the masked patch: a closed slab, or an open sheet if thickness=0."""
+    u0, v0 = patch['u0'], patch['v0']
+    du, dv, n = patch['du'], patch['dv'], patch['n']
+    keep, heights = patch['keep'], patch['heights']
+    if thickness is None:
+        thickness = patch['thickness']
+    half = thickness * 0.5
+
+    bm = bmesh.new()
+    top, bottom = {}, {}
+
+    def vert(cache, i, j, offset):
+        if (i, j) not in cache:
+            cache[(i, j)] = bm.verts.new(
+                (u0 + du * i, v0 + dv * j, heights[i][j] + offset))
+        return cache[(i, j)]
+
+    def kept(i, j):
+        return 0 <= i < n and 0 <= j < n and keep[i][j]
+
+    for i in range(n):
+        for j in range(n):
+            if not keep[i][j]:
+                continue
+            bm.faces.new((vert(top, i, j, half), vert(top, i + 1, j, half),
+                          vert(top, i + 1, j + 1, half),
+                          vert(top, i, j + 1, half)))
+            if half <= 0.0:
+                continue
+            bm.faces.new((vert(bottom, i, j, -half),
+                          vert(bottom, i, j + 1, -half),
+                          vert(bottom, i + 1, j + 1, -half),
+                          vert(bottom, i + 1, j, -half)))
+            # Walls wherever the neighbouring cell is not part of the patch.
+            if not kept(i - 1, j):
+                bm.faces.new((vert(top, i, j, half),
+                              vert(top, i, j + 1, half),
+                              vert(bottom, i, j + 1, -half),
+                              vert(bottom, i, j, -half)))
+            if not kept(i + 1, j):
+                bm.faces.new((vert(top, i + 1, j, half),
+                              vert(bottom, i + 1, j, -half),
+                              vert(bottom, i + 1, j + 1, -half),
+                              vert(top, i + 1, j + 1, half)))
+            if not kept(i, j - 1):
+                bm.faces.new((vert(top, i, j, half),
+                              vert(bottom, i, j, -half),
+                              vert(bottom, i + 1, j, -half),
+                              vert(top, i + 1, j, half)))
+            if not kept(i, j + 1):
+                bm.faces.new((vert(top, i, j + 1, half),
+                              vert(top, i + 1, j + 1, half),
+                              vert(bottom, i + 1, j + 1, -half),
+                              vert(bottom, i, j + 1, -half)))
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    return bm
+
+
+def build_local_slab(cut, target, resolution=48, scene=None):
+    """Thin closed slab spanning only the cut's ring-fenced region.
+
+    Subtracting this severs the model along the cut line and nowhere else;
+    the pieces then fall out as separate connected components.
+    """
+    scene = scene or bpy.context.scene
+    patch = patch_grid(cut, target, resolution)
+    if patch is None:
+        return None
+    bm = _patch_bm(patch)
+    if not bm.faces:
+        bm.free()
+        return None
+    obj = core.new_mesh_object("PartPin_Slab", bm, scene.collection,
+                               matrix=cut.matrix_world.copy())
+    obj.hide_render = True
+    return obj
 
 
 def build_surface_cutter(cut, target, resolution=48, scene=None):
@@ -524,9 +828,13 @@ def snap_connectors(cut, field=None):
     return moved
 
 
-def surface_connector_matrices(target, cut, count, samples=22):
-    """Connector transforms spread over the part of the surface that is
-    inside the model, each aligned to the surface normal."""
+def surface_connector_matrices(target, cut, count, inset=0.0, samples=22):
+    """Connector transforms spread over the seam, aligned to the surface.
+
+    Candidates must sit inside the model *and* inside the cut line — the
+    seam only exists there — and `inset` keeps them clear of its edge so a
+    pin is not left half-hanging off the cut.
+    """
     field = field_for(cut)
     pts = control_points(cut)
     if not pts:
@@ -535,15 +843,24 @@ def surface_connector_matrices(target, cut, count, samples=22):
     vs = [p.y for p in pts]
     u0, u1, v0, v1 = min(us), max(us), min(vs), max(vs)
     n = max(int(samples), 3)
+    polys = loop_polygons(cut)
 
-    candidates = []
-    for i in range(n):
-        for j in range(n):
-            u = u0 + (u1 - u0) * (i + 0.5) / n
-            v = v0 + (v1 - v0) * (j + 0.5) / n
-            local = Vector((u, v, field.eval(u, v)))
-            if core.point_inside(target, cut.matrix_world @ local):
-                candidates.append((u, v, local))
+    def gather(required_inset):
+        found = []
+        for i in range(n):
+            for j in range(n):
+                u = u0 + (u1 - u0) * (i + 0.5) / n
+                v = v0 + (v1 - v0) * (j + 0.5) / n
+                if loop_inset(u, v, polys) < required_inset:
+                    continue
+                local = Vector((u, v, field.eval(u, v)))
+                if core.point_inside(target, cut.matrix_world @ local):
+                    found.append((u, v, local))
+        return found
+
+    candidates = gather(inset)
+    if not candidates:  # thin region: allow pins closer to the edge
+        candidates = gather(0.0)
     if not candidates:
         return []
 

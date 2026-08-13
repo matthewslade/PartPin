@@ -24,7 +24,8 @@ SEGMENT_SUBDIV = 8
 
 STATUS = ("Drag points on the model to reshape the cut    "
           "Ctrl+Click: add point    X: remove point    "
-          "Ctrl+Wheel: falloff    Enter: confirm    Esc: cancel")
+          "Alt+X: remove whole line    Ctrl+Wheel: falloff    "
+          "Enter: confirm    Esc: cancel")
 
 
 def _draw_lines(points, color, width, depth_test):
@@ -274,6 +275,26 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         self.moved = True
         self._rebuild_cache()
 
+    def _delete_loop(self, index):
+        """Drop a whole cut line — the region it fences stops being cut."""
+        items = [(Vector(p.co), p.loop) for p in self.cut.pp_points]
+        if index < 0 or index >= len(items):
+            self.report({'WARNING'}, "Hover a point on the line to remove it")
+            return
+        doomed = items[index][1]
+        kept = [(co, loop) for co, loop in items if loop != doomed]
+        if not kept:
+            self.report({'WARNING'}, "A cut needs at least one line")
+            return
+        order = {loop: i for i, loop
+                 in enumerate(sorted({loop for _co, loop in kept}))}
+        surface.store_control_points(self.cut, [co for co, _l in kept],
+                                     [order[l] for _co, l in kept])
+        self.hover = -1
+        self.moved = True
+        self._rebuild_cache()
+        self.report({'INFO'}, "Cut line removed — that region stays whole")
+
     # ------------------------------------------------------------------
     # Modal
     # ------------------------------------------------------------------
@@ -331,7 +352,9 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
                 return {'RUNNING_MODAL'}
 
         if event.type in {'X', 'DEL'} and event.value == 'PRESS':
-            if self.hover >= 0:
+            if event.alt:
+                self._delete_loop(self.hover)
+            elif self.hover >= 0:
                 self._delete_point(self.hover)
             return {'RUNNING_MODAL'}
 

@@ -48,6 +48,7 @@ Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
    | Drag a point | It slides along the model's surface; the cut reshapes to pass through it |
    | Ctrl+Click | Add a point on the surface |
    | X | Remove the point under the cursor |
+   | Alt+X | Remove a whole cut line (that region stops being cut) |
    | Ctrl+Wheel | Widen / tighten the falloff (how far each point's pull spreads) |
    | Enter | Confirm |
    | Esc | Revert |
@@ -59,10 +60,25 @@ Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
    turns the cut into a **free-form cut surface**: a smooth surface that
    passes exactly through every point you place. It is stored as a
    height field over the original plane, which means it can never fold
-   back on itself — the cut always yields two clean, closed parts. Cuts
-   with two section lines (a ring, for example) are supported: both are
-   editable at once. **Flatten** returns a reshaped cut to a plane, and
-   **Snap Connectors** re-seats existing pins onto the new surface.
+   back on itself — the cut always yields clean, closed parts.
+   **Flatten** returns a reshaped cut to a plane, and **Snap
+   Connectors** re-seats existing pins onto the new surface.
+
+   **The cut stops at the line** (*Cut Inside Line Only*, on by default).
+   Only the region ring-fenced by the cut line is severed — the cut does
+   not carry on as an endless plane through the rest of the model. Draw a
+   line round a head, an arm or a knob and only that comes off; anything
+   else the old plane happened to pass through is left whole. The piece
+   may be far wider than the line that fences it (a mushroom head on a
+   thin stalk comes off intact), because the region is found by following
+   the model, not by clipping to the line's outline.
+
+   A cut picks up a line on **every** feature it crosses, and each one
+   cuts. Hover a line and press **Alt+X** to drop the ones you don't
+   want. If a cut refuses to separate a region, raise *Edge Margin* — it
+   controls how far past the line the cut reaches to break through the
+   surface. Untick *Cut Inside Line Only* for the old behaviour of
+   splitting everything the surface meets.
 
 4. **Add connectors** — with a cut active, **Add Connectors** places
    `Count` pins spaced along the cut cross-section. They are ordinary
@@ -103,6 +119,8 @@ step.
 - Drawn curved cuts (freehand stroke in the viewport)
 - On-surface fine-tuning: drag the cut line's points along the model to
   reshape the cut, with add/remove points and adjustable falloff
+- Localized cuts: only the region ring-fenced by the cut line is severed,
+  leaving the rest of the model whole
 - Built-in connector shapes plus custom connector meshes
 - Connector position / rotation / scale editing and pin-side flip
 - Adjustable pin/socket clearance, per connector
@@ -137,6 +155,13 @@ On macOS the binary is usually
   back of the model, orbit the view first.
 - Surface cuts are graded by *Surface Detail*: raise it if a reshaped cut
   looks faceted, lower it if cutting gets slow.
+- A localized cut removes a hair of material at the seam (0.01% of the
+  model — 0.02 mm on a 200 mm print), so the two faces mate with a gap far
+  below what a printer resolves.
+- A localized cut needs its line to close around a region. If the line
+  runs off the model, or *Edge Margin* is too small to break through the
+  surface, the cut reports that it separated nothing rather than
+  silently doing the wrong thing.
 - Modifiers on the model are baked into the parts.
 - Work on one model at a time; *Clear All Cuts* resets the drafts.
 

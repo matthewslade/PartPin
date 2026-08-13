@@ -568,6 +568,65 @@ def split_parts(parts, cutter, parts_coll):
     return result, split_any
 
 
+def split_loose(obj):
+    """Split an object's disconnected shells into separate objects."""
+    context = bpy.context
+    view_layer = context.view_layer
+    if obj.name not in view_layer.objects:
+        return [obj]
+    previous = view_layer.objects.active
+    for other in list(context.selected_objects):
+        other.select_set(False)
+    obj.select_set(True)
+    view_layer.objects.active = obj
+    try:
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.mesh.separate(type='LOOSE')
+    except RuntimeError:
+        return [obj]
+    finally:
+        if obj.mode != 'OBJECT':
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except RuntimeError:
+                pass
+        view_layer.objects.active = previous
+
+    pieces = [o for o in context.selected_objects if o.type == 'MESH']
+    if obj not in pieces:
+        pieces.append(obj)
+    return pieces
+
+
+def split_parts_local(parts, slab, parts_coll):
+    """Sever parts with a thin slab and keep the resulting pieces.
+
+    Unlike a plane cutter this only separates what the slab actually
+    spans, so material elsewhere in the model is left whole.
+    """
+    result = []
+    split_any = False
+    for part in parts:
+        work = duplicate_object(part, part.name, parts_coll)
+        if not boolean_apply(work, slab, 'DIFFERENCE'):
+            remove_object(work)
+            result.append(part)
+            continue
+        pieces = split_loose(work)
+        if len(pieces) < 2:
+            for piece in pieces:
+                remove_object(piece)
+            result.append(part)
+            continue
+        remove_object(part)
+        for piece in pieces:
+            piece.pp_role = ROLE_PART
+        result.extend(pieces)
+        split_any = True
+    return result, split_any
+
+
 def apply_connector(parts, conn, scene, warnings):
     pin_pt, sock_pt = connector_probe_points(conn)
     pin_part = next((p for p in parts if point_inside(p, pin_pt)), None)
@@ -598,14 +657,30 @@ def create_parts(context, target, cuts, keep_original=True, part_gap=0.0):
     base.hide_render = False
     parts = [base]
 
+    from . import surface  # local import: surface.py builds on this module
+
     for cut in cuts:
-        cutter = build_cutter(cut, target, scene)
+        localized = surface.is_local(cut)
+        if localized:
+            resolution = get_settings(context).surface_resolution
+            cutter = surface.build_local_slab(cut, target, resolution, scene)
+        else:
+            cutter = build_cutter(cut, target, scene)
         if cutter is None:
             warnings.append(f"Cut '{cut.name}' has no usable geometry — skipped")
             continue
-        parts, split_any = split_parts(parts, cutter, parts_coll)
-        if not split_any:
-            warnings.append(f"Cut '{cut.name}' did not split anything")
+
+        if localized:
+            parts, split_any = split_parts_local(parts, cutter, parts_coll)
+            if not split_any:
+                warnings.append(
+                    f"Cut '{cut.name}' did not separate anything — its cut "
+                    "line may not close around a region, or Edge Margin is "
+                    "too small")
+        else:
+            parts, split_any = split_parts(parts, cutter, parts_coll)
+            if not split_any:
+                warnings.append(f"Cut '{cut.name}' did not split anything")
         remove_object(cutter)
 
     context.view_layer.update()

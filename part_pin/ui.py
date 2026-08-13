@@ -96,14 +96,23 @@ class PARTPIN_PT_shape(PARTPIN_PT_base, bpy.types.Panel):
         layout.prop(s, "handle_points")
 
         if cut is not None and cut.pp_cut_kind == 'SURFACE':
+            loops = len({p.loop for p in cut.pp_points})
             box = layout.box()
-            box.label(text=f"{len(cut.pp_points)} points on {cut.name}",
+            box.label(text=f"{len(cut.pp_points)} points, "
+                           f"{loops} line{'s' if loops != 1 else ''}",
                       icon='SURFACE_NSURFACE')
+            box.prop(cut, "pp_local")
+            sub = box.column()
+            sub.enabled = cut.pp_local
+            sub.prop(cut, "pp_margin")
             box.prop(cut, "pp_falloff")
             box.prop(s, "surface_resolution")
             row = box.row(align=True)
             row.operator("partpin.snap_connectors", text="Snap Connectors")
             row.operator("partpin.reset_cut_shape", text="Flatten")
+            if loops > 1 and cut.pp_local:
+                box.label(text="Alt+X while editing drops a line",
+                          icon='INFO')
         else:
             layout.label(text="Drag the cut line right on the model",
                          icon='INFO')

@@ -460,10 +460,13 @@ def scenario_surface_drag(core):
           f"{total:.4f} vs {original_volume:.4f}")
 
     # The seam must actually run through the dragged point: it lies on the
-    # cut face, which both parts share.
+    # cut face, which both parts share. The cut surface is a grid, so allow
+    # roughly one cell of discretization error.
+    lo, hi = core.world_bbox(model)
+    cell = max(hi - lo) * 1.16 / s.surface_resolution
     worst = max(surface_distance(p, dragged) for p in parts)
-    check("both parts touch the dragged point", worst < 0.02,
-          f"max distance {worst:.4f}")
+    check("both parts touch the dragged point", worst < cell * 1.5,
+          f"max distance {worst:.4f}, one grid cell is {cell:.4f}")
 
     lower = min(parts, key=lambda p: z_range(p)[0])
     check("cut is no longer flat (lower part bulges upward)",
@@ -608,6 +611,332 @@ def scenario_surface_from_curve(core):
         check(f"part closed: {p.name}", is_closed(core, p))
 
 
+def make_two_spheres(core, gap=4.0):
+    """One mesh, two separate closed spheres — a stand-in for a model whose
+    features a plane would cross in several places."""
+    import bmesh as bm_mod
+    bm = bm_mod.new()
+    bm_mod.ops.create_uvsphere(bm, u_segments=40, v_segments=20, radius=1.0)
+    verts_a = list(bm.verts)
+    ret = bm_mod.ops.duplicate(bm, geom=verts_a + list(bm.edges)
+                               + list(bm.faces))
+    moved = [g for g in ret['geom'] if isinstance(g, bm_mod.types.BMVert)]
+    bm_mod.ops.translate(bm, verts=moved, vec=(gap, 0.0, 0.0))
+    mesh = bpy.data.meshes.new("Pair")
+    bm.to_mesh(mesh)
+    bm.free()
+    return link(bpy.data.objects.new("Pair", mesh))
+
+
+def make_mushroom(core):
+    """A wide head on a narrow stalk: the piece is far wider than the loop
+    that ring-fences it."""
+    import bmesh as bm_mod
+    bm = bm_mod.new()
+    bm_mod.ops.create_uvsphere(bm, u_segments=40, v_segments=20, radius=0.55)
+    for v in bm.verts:
+        v.co.z += 0.95
+    head = bpy.data.meshes.new("head")
+    bm.to_mesh(head)
+    bm.free()
+    head_obj = link(bpy.data.objects.new("head", head))
+
+    bm = bm_mod.new()
+    bm_mod.ops.create_cone(bm, cap_ends=True, cap_tris=False, segments=32,
+                           radius1=0.16, radius2=0.16, depth=2.0)
+    stalk = bpy.data.meshes.new("Mushroom")
+    bm.to_mesh(stalk)
+    bm.free()
+    obj = link(bpy.data.objects.new("Mushroom", stalk))
+
+    mod = obj.modifiers.new("u", 'BOOLEAN')
+    mod.object, mod.operation, mod.solver = head_obj, 'UNION', 'EXACT'
+    dg = bpy.context.evaluated_depsgraph_get()
+    merged = bpy.data.meshes.new_from_object(obj.evaluated_get(dg))
+    obj.modifiers.clear()
+    obj.data = merged
+    bpy.data.objects.remove(head_obj)
+    bpy.context.view_layer.update()
+    return obj
+
+
+def scenario_local_leaves_rest_whole(core):
+    print("Scenario: localized cut leaves the rest of the model whole")
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_two_spheres(core)
+    s.target = model
+    from part_pin import surface
+
+    bpy.ops.partpin.add_plane_cut()
+    cut = bpy.context.view_layer.objects.active
+    cut.location = (0.0, 0.0, 0.0)
+    bpy.context.view_layer.update()
+    cut, error = surface.convert_to_surface(bpy.context, cut, model,
+                                            per_loop=14)
+    check("conversion found both cut lines",
+          cut is not None and len({p.loop for p in cut.pp_points}) == 2,
+          str(error))
+    if cut is None:
+        return
+
+    # Drop one sphere's cut line: that sphere should then stay in one piece.
+    kept_loop = cut.pp_points[0].loop
+    keep = [(Vector(p.co), p.loop) for p in cut.pp_points
+            if p.loop == kept_loop]
+    surface.store_control_points(cut, [c for c, _l in keep],
+                                [0] * len(keep))
+    check("localized cutting is on by default", cut.pp_local)
+    # Which sphere the surviving line encircles (x≈0 or x≈4): the line's
+    # centroid, not any single point of it.
+    centre = sum((cut.matrix_world @ co for co, _l in keep),
+                 Vector()) / len(keep)
+    fenced_x = 0.0 if centre.x < 2.0 else 4.0
+    other_x = 4.0 - fenced_x
+
+    bpy.ops.partpin.create_parts()
+    parts = parts_of(s)
+    check("three parts: two halves plus the untouched sphere",
+          len(parts) == 3, f"got {len(parts)}")
+    for p in parts:
+        check(f"part closed: {p.name}", is_closed(core, p))
+    if len(parts) != 3:
+        return
+
+    def centre_x(part):
+        lo, hi = core.world_bbox(part)
+        return (lo.x + hi.x) / 2.0
+
+    def height(part):
+        lo, hi = core.world_bbox(part)
+        return hi.z - lo.z
+
+    sphere_volume = 4.0 / 3.0 * math.pi
+    whole = [p for p in parts if volume(p) > sphere_volume * 0.9]
+    check("one sphere was not cut at all", len(whole) == 1,
+          f"volumes {sorted(round(volume(p), 3) for p in parts)}")
+    if whole:
+        check("the untouched part is the sphere whose line was dropped",
+              abs(centre_x(whole[0]) - other_x) < 0.5,
+              f"centre x {centre_x(whole[0]):.2f}, expected ~{other_x}")
+        check("untouched sphere spans its full height",
+              height(whole[0]) > 1.9, f"height {height(whole[0]):.3f}")
+
+    halves = [p for p in parts if p not in whole]
+    check("the ring-fenced sphere became two halves", len(halves) == 2)
+    check("halves belong to the ring-fenced sphere",
+          all(abs(centre_x(p) - fenced_x) < 0.5 for p in halves),
+          f"centres {[round(centre_x(p), 2) for p in halves]}")
+    check("each half is about half a sphere",
+          all(height(p) < 1.2 for p in halves),
+          f"heights {[round(height(p), 2) for p in halves]}")
+
+
+def scenario_local_vs_full(core):
+    print("Scenario: turning localization off cuts everything again")
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_two_spheres(core)
+    s.target = model
+    from part_pin import surface
+
+    bpy.ops.partpin.add_plane_cut()
+    cut = bpy.context.view_layer.objects.active
+    cut, _error = surface.convert_to_surface(bpy.context, cut, model,
+                                             per_loop=14)
+    keep = [(Vector(p.co), p.loop) for p in cut.pp_points if p.loop == 0]
+    surface.store_control_points(cut, [c for c, _l in keep], [0] * len(keep))
+    cut.pp_local = False
+
+    bpy.ops.partpin.create_parts()
+    parts = parts_of(s)
+    check("full-extent cut gives two parts", len(parts) == 2,
+          f"got {len(parts)}")
+    # Every part is a slice: none spans a whole sphere's height any more.
+    tallest = 0.0
+    for p in parts:
+        lo, hi = core.world_bbox(p)
+        tallest = max(tallest, hi.z - lo.z)
+    check("full-extent cut slices both spheres (old behaviour)",
+          tallest < 1.2, f"tallest part spans {tallest:.3f} of 2.0")
+    spans_both = [p for p in parts
+                  if (core.world_bbox(p)[1].x - core.world_bbox(p)[0].x) > 4.0]
+    check("each part contains material from both spheres",
+          len(spans_both) == 2, f"got {len(spans_both)}")
+
+
+def scenario_local_wide_piece(core):
+    print("Scenario: localized cut keeps a piece wider than its cut line")
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_mushroom(core)
+    s.target = model
+    from part_pin import surface
+
+    bpy.ops.partpin.add_plane_cut()
+    cut = bpy.context.view_layer.objects.active
+    cut.location = (0.0, 0.0, 0.2)  # through the narrow stalk
+    bpy.context.view_layer.update()
+    cut, error = surface.convert_to_surface(bpy.context, cut, model,
+                                            per_loop=14)
+    check("cut line found around the stalk", cut is not None, str(error))
+    if cut is None:
+        return
+    polys = surface.loop_polygons(cut)
+    span = max(max(u for u, _v in polys[0]) - min(u for u, _v in polys[0]),
+               max(v for _u, v in polys[0]) - min(v for _u, v in polys[0]))
+    check("cut line is narrow (the stalk)", span < 0.45, f"span {span:.3f}")
+
+    bpy.ops.partpin.create_parts()
+    parts = parts_of(s)
+    check("mushroom split in two", len(parts) == 2, f"got {len(parts)}")
+    for p in parts:
+        check(f"part closed: {p.name}", is_closed(core, p))
+    if len(parts) != 2:
+        return
+    top = max(parts, key=lambda p: core.world_bbox(p)[1].z)
+    lo, hi = core.world_bbox(top)
+    check("the head kept its full width — not clipped to the cut line",
+          (hi.x - lo.x) > 1.0, f"width {hi.x - lo.x:.3f}")
+    check("head volume is intact",
+          volume(top) > 0.6, f"volume {volume(top):.3f}")
+
+
+def scenario_local_seam(core):
+    print("Scenario: localized seam mates tightly and follows dragged points")
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_sphere()
+    original_volume = volume(model)
+    s.target = model
+    s.count = 2
+    from part_pin import surface
+
+    bpy.ops.partpin.add_plane_cut()
+    cut = bpy.context.view_layer.objects.active
+    cut, _error = surface.convert_to_surface(bpy.context, cut, model,
+                                             per_loop=16)
+    point = cut.pp_points[0]
+    start = cut.matrix_world @ Vector(point.co)
+    azimuth = math.atan2(start.y, start.x)
+    lat = math.radians(35.0)
+    dragged = surface.project_to_surface(
+        model, Vector((math.cos(lat) * math.cos(azimuth),
+                       math.cos(lat) * math.sin(azimuth),
+                       math.sin(lat))))
+    point.co = cut.matrix_world.inverted() @ dragged
+    surface.build_display_mesh(cut, model)
+
+    bpy.context.view_layer.objects.active = cut
+    bpy.ops.partpin.add_connectors()
+    conns = core.cut_connectors(bpy.context.scene, cut)
+    check("connectors placed inside the cut line", len(conns) == 2,
+          f"got {len(conns)}")
+    polys = surface.loop_polygons(cut)
+    worst_inset = min(
+        surface.loop_inset(*(cut.matrix_world.inverted()
+                             @ c.matrix_world.translation)[:2], polys)
+        for c in conns)
+    check("connectors are inside the cut line, not on its edge",
+          worst_inset > 0.0, f"min inset {worst_inset:.4f}")
+
+    # Drop the pins before measuring the seam: a pin adds material to one
+    # part, which would mask how much the seam itself removes.
+    for conn in conns:
+        core.remove_object(conn)
+    bpy.context.view_layer.update()
+
+    bpy.ops.partpin.create_parts()
+    parts = parts_of(s)
+    check("localized reshaped cut makes two parts", len(parts) == 2,
+          f"got {len(parts)}")
+    for p in parts:
+        check(f"part closed: {p.name}", is_closed(core, p))
+    if len(parts) != 2:
+        return
+    total = sum(volume(p) for p in parts)
+    lost = original_volume - total
+    check("almost no material lost at the seam",
+          0.0 <= lost < original_volume * 0.01,
+          f"lost {lost:.5f} of {original_volume:.3f}")
+    lo, hi = core.world_bbox(model)
+    cell = max(hi - lo) * 1.16 / s.surface_resolution
+    worst = max(surface_distance(p, dragged) for p in parts)
+    check("seam still runs through the dragged point", worst < cell * 1.5,
+          f"max distance {worst:.4f}, one grid cell is {cell:.4f}")
+
+    lower = min(parts, key=lambda p: z_range(p)[0])
+    check("seam is not flat", z_range(lower)[1] > 0.25,
+          f"max z {z_range(lower)[1]:.3f}")
+
+
+def scenario_local_display(core):
+    print("Scenario: preview mesh shows only the localized patch")
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_sphere()
+    s.target = model
+    from part_pin import surface
+
+    bpy.ops.partpin.add_plane_cut()
+    cut = bpy.context.view_layer.objects.active
+    cut, _error = surface.convert_to_surface(bpy.context, cut, model,
+                                             per_loop=16)
+    bpy.context.view_layer.update()  # refresh the cached bounding box
+    lo, hi = core.world_bbox(cut)
+    check("localized preview hugs the cut line, not the whole plane",
+          (hi.x - lo.x) < 3.0, f"preview width {hi.x - lo.x:.3f}")
+
+    cut.pp_local = False
+    surface.build_display_mesh(cut, model)
+    bpy.context.view_layer.update()
+    lo2, hi2 = core.world_bbox(cut)
+    check("full-extent preview is wider than the model",
+          (hi2.x - lo2.x) > 2.0 and (hi2.x - lo2.x) >= (hi.x - lo.x),
+          f"{hi2.x - lo2.x:.3f} vs {hi.x - lo.x:.3f}")
+
+
+def scenario_delete_loop(core):
+    print("Scenario: Alt+X removes a whole cut line")
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_two_spheres(core)
+    s.target = model
+    from part_pin import shape_edit, surface
+    import types
+
+    bpy.ops.partpin.add_plane_cut()
+    cut = bpy.context.view_layer.objects.active
+    cut, _error = surface.convert_to_surface(bpy.context, cut, model,
+                                             per_loop=12)
+    check("two lines before removal",
+          len({p.loop for p in cut.pp_points}) == 2)
+
+    cls = shape_edit.PARTPIN_OT_edit_cut_surface
+    op = types.SimpleNamespace()
+    for name in ('_rebuild_cache', '_delete_loop'):
+        setattr(op, name, getattr(cls, name).__get__(op))
+    op.cut, op.target = cut, model
+    op.hover, op.dragging, op.moved, op._cache = -1, -1, False, None
+    op.report = lambda *a, **k: None
+    op._rebuild_cache()
+
+    second = next(i for i, p in enumerate(cut.pp_points) if p.loop == 1)
+    op._delete_loop(second)
+    check("one line left after Alt+X",
+          len({p.loop for p in cut.pp_points}) == 1,
+          f"{sorted({p.loop for p in cut.pp_points})}")
+    check("remaining points all belong to line 0",
+          all(p.loop == 0 for p in cut.pp_points))
+    check("12 points remain", len(cut.pp_points) == 12,
+          f"got {len(cut.pp_points)}")
+
+    op.hover = 0
+    op._delete_loop(0)
+    check("refuses to remove the last line",
+          len(cut.pp_points) == 12, f"got {len(cut.pp_points)}")
+
+
 def scenario_modal_helpers(core):
     """Drive the modal operator's logic directly (everything but the GPU)."""
     print("Scenario: surface-edit modal helpers")
@@ -707,6 +1036,12 @@ def main():
     scenario_surface_connectors(core)
     scenario_surface_multi_loop(core)
     scenario_surface_from_curve(core)
+    scenario_local_leaves_rest_whole(core)
+    scenario_local_vs_full(core)
+    scenario_local_wide_piece(core)
+    scenario_local_seam(core)
+    scenario_local_display(core)
+    scenario_delete_loop(core)
     scenario_modal_helpers(core)
     scenario_operators_registered(core)
     scenario_export(core)  # runs easy mode internally, then exports

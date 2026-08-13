@@ -375,8 +375,9 @@ class PARTPIN_OT_add_connectors(bpy.types.Operator):
             core.auto_size_defaults(s, target)
 
         if cut.pp_cut_kind == 'SURFACE':
-            matrices = surface.surface_connector_matrices(target, cut,
-                                                          s.count)
+            matrices = surface.surface_connector_matrices(
+                target, cut, s.count,
+                inset=s.size * 0.5 + s.clearance)
         elif cut.pp_cut_kind == 'CURVE':
             matrices = core.curve_connector_matrices(target, cut, s.count)
         else:
