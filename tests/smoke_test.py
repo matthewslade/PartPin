@@ -856,8 +856,11 @@ def scenario_local_seam(core):
         return
     total = sum(volume(p) for p in parts)
     lost = original_volume - total
-    check("almost no material lost at the seam",
-          0.0 <= lost < original_volume * 0.01,
+    # The two halves are parted along the model's own faces and capped with
+    # one and the same polygon, so between them they are still the model —
+    # nothing is spent at the seam at all.
+    check("no material lost at the seam",
+          abs(lost) < original_volume * 1e-6,
           f"lost {lost:.5f} of {original_volume:.3f}")
     lo, hi = core.world_bbox(model)
     cell = max(hi - lo) * 1.16 / s.surface_resolution
@@ -1365,10 +1368,14 @@ def scenario_overhang_outside_line_survives(core):
           f"body reaches x {hi2.x:.2f}, overhang tip is at 1.5")
 
 
-def scenario_joined_outside_line_reports(core):
-    """A piece joined to the model outside the line cannot come away without
-    cutting outside it, so the cut says so and leaves the model alone."""
-    print("Scenario: a piece joined outside the line reports plainly")
+def scenario_line_across_a_fin_cuts_it(core):
+    """A fin crossing the line is cut where the line crosses it.
+
+    The line is drawn onto the model, so where it runs over a fin it is asking
+    for the fin to be cut there too. The cut follows it and says nothing:
+    there is no failure here to report.
+    """
+    print("Scenario: a fin the line runs across is cut with it")
     reset_scene()
     from part_pin import surface
     s = bpy.context.scene.part_pin
@@ -1380,29 +1387,22 @@ def scenario_joined_outside_line_reports(core):
     failures = []
     parts, _applied, _warns = core.create_parts(
         bpy.context, model, [cut], keep_original=True, failures=failures)
-    check("the model is left whole", len(parts) == 1, f"got {len(parts)}")
-    check("nothing was shaved off it",
-          abs(volume(parts[0]) - before) < before * 0.01,
-          f"{volume(parts[0]):.4f} vs {before:.4f}")
-    check("the reason is reported", len(failures) == 1, str(failures))
-    check("it says what to do",
-          failures and ("draw the line closer" in failures[0].lower()
-                        or "move the line" in failures[0].lower()
-                        or "slide the line" in failures[0].lower()
-                        or "nudge a point" in failures[0].lower()),
-          str(failures))
-    # Either it points at the model (a piece joined on) or at the cutter
-    # tangling — but it must never leave the user with nothing to act on.
-    check("it says where to look or what to try",
-          failures and ("Edit Cut on Surface" in failures[0]
-                        or "Surface Detail" in failures[0]), str(failures))
-    joined, holes = surface.find_join_hints(cut, model)
-    marks = list(joined) + list(holes)
-    if marks:
-        middle = sum(marks, Vector()) / len(marks)
-        check("any marks sit on the cut, not scattered over the model",
-              all((m - middle).length < core.bbox_diagonal(model)
-                  for m in marks))
+    check("the fin does not stop the cut", len(parts) == 2,
+          f"got {len(parts)}: {failures}")
+    check("nothing is reported, because nothing went wrong",
+          not failures, str(failures))
+    if len(parts) != 2:
+        return
+    for p in parts:
+        check(f"part closed: {p.name}", is_closed(core, p))
+    check("the model is all still there",
+          abs(sum(volume(p) for p in parts) - before) < before * 1e-6,
+          f"{sum(volume(p) for p in parts):.4f} vs {before:.4f}")
+    # The fin stands well clear of the limb, so each side keeping some of it
+    # is what tells us the fin was cut rather than carried off whole.
+    fin_high = [p for p in parts if core.world_bbox(p)[1].z > 0.5]
+    check("the fin was cut, not carried off whole", len(fin_high) == 2,
+          f"{[round(core.world_bbox(p)[1].z, 2) for p in parts]}")
 
 
 def scenario_check_line_operator(core):
@@ -1847,27 +1847,77 @@ def scenario_trial_cut(core):
                if "Trial" in o.name or "Cap" in o.name],
           str([o.name for o in bpy.context.scene.objects]))
 
+    # The answer has to be the same as the cut's, on a harder model than the
+    # first: a fin crossing the line, which the trial must neither flinch at
+    # nor mark up if the cut goes through with it.
     reset_scene()
     s = bpy.context.scene.part_pin
-    blocked_model = make_limb_with_fin(core)
-    s.target = blocked_model
-    blocked = collar_cut(core, surface, blocked_model)
-    pieces, joined, holes = surface.trial_cut(blocked, blocked_model)
-    check("a blocked line is reported as not separating", pieces == 1,
-          f"{pieces}")
-    check("and carries marks explaining why", joined or holes,
-          f"{len(joined)} red, {len(holes)} violet")
-    check("the marks are recorded for the editor to draw",
-          surface.JOIN_HINTS.get(blocked.name, {}).get('holes')
-          or surface.JOIN_HINTS.get(blocked.name, {}).get('joined'))
-
-    # And the real cut agrees with the trial.
+    finned = make_limb_with_fin(core)
+    s.target = finned
+    across = collar_cut(core, surface, finned)
+    pieces, joined, holes = surface.trial_cut(across, finned)
     failures = []
     parts, _applied, _warns = core.create_parts(
-        bpy.context, blocked_model, [blocked], keep_original=True,
-        failures=failures)
+        bpy.context, finned, [across], keep_original=True, failures=failures)
     check("the trial matches what the cut does", len(parts) == pieces,
-          f"trial {pieces}, cut {len(parts)}")
+          f"trial {pieces}, cut {len(parts)}: {failures}")
+    check("a line across a fin still separates", pieces == 2, f"{pieces}")
+    check("and carries no marks either", not joined and not holes,
+          f"{len(joined)} red, {len(holes)} violet")
+
+
+def scenario_seam_lands_on_the_line(core):
+    """The seam has to be the drawn line, not a surface fitted near it.
+
+    A point on the line ends up on the seam exactly when it lies on the skin
+    of *both* halves: anywhere the cut wandered off the line, the point would
+    be buried inside one of them instead. Measured on a limb, where the line
+    curves, and on a cube, where it turns corners.
+    """
+    print("Scenario: the seam lands on the drawn line")
+    from part_pin import surface
+
+    def measure(label, model, cut, allow):
+        rings, _normals, _normal = surface.line_rings(cut, model)
+        check(f"{label}: the line is there to check", bool(rings))
+        if not rings:
+            return
+        failures = []
+        parts, _applied, _warns = core.create_parts(
+            bpy.context, model, [cut], keep_original=True, failures=failures)
+        check(f"{label}: two parts", len(parts) == 2,
+              f"got {len(parts)}: {failures}")
+        if len(parts) != 2:
+            return
+        for p in parts:
+            check(f"{label}: part closed: {p.name}", is_closed(core, p))
+        diagonal = core.bbox_diagonal(model)
+        worst = max(max(surface_distance(p, point) for p in parts)
+                    for ring in rings for point in ring)
+        check(f"{label}: every point of the line is on the seam",
+              worst < diagonal * allow,
+              f"worst {worst / diagonal:.4%} of the model, allowed {allow:.2%}")
+
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    measure("limb", model, collar_cut(core, surface, model), 0.002)
+
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_cube_model(core)
+    s.target = model
+    cut, _error = surface.cut_from_stroke(bpy.context, model,
+                                          waist_stroke(surface, model),
+                                          per_loop=16)
+    if cut is not None:
+        measure("cube", model, cut, 0.002)
+
+    # And the cut leaves nothing of its own behind.
+    strays = [o.name for o in bpy.context.scene.objects
+              if o.name.startswith("PartPin_")]
+    check("no working objects are left in the scene", not strays, str(strays))
 
 
 def scenario_line_hugs_surface(core):
@@ -2281,7 +2331,7 @@ def main():
     scenario_collar_plus_leftover_line(core)
     scenario_arm_at_shoulder(core)
     scenario_overhang_outside_line_survives(core)
-    scenario_joined_outside_line_reports(core)
+    scenario_line_across_a_fin_cuts_it(core)
     scenario_check_line_operator(core)
     scenario_unusable_line_reports(core)
     scenario_corners_are_kept(core)
@@ -2293,6 +2343,7 @@ def main():
     scenario_draw_operator_registered(core)
     scenario_lid_reaches_the_line(core)
     scenario_trial_cut(core)
+    scenario_seam_lands_on_the_line(core)
     scenario_line_hugs_surface(core)
     scenario_cap_preview(core)
     scenario_cut_object_shows_the_lid(core)

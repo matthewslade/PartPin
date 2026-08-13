@@ -631,6 +631,31 @@ def drop_debris(pieces, share=1e-4):
     return (kept or pieces), dropped
 
 
+def split_parts_surgery(parts, rings, normals, normal, scene, parts_coll):
+    """Cut every part the drawn line runs across, and leave the rest whole.
+
+    A line only ever crosses one of the parts on the table, and it may cross
+    none of them if an earlier cut already took that piece away, so a part the
+    line misses is not a failure — it is passed through untouched.
+    """
+    from . import mesh_cut  # local import: mesh_cut builds on this module
+
+    result = []
+    split_any = False
+    for part in parts:
+        pieces, _problem = mesh_cut.cut_object(part, rings, normals, normal,
+                                               scene, parts_coll)
+        if pieces is None:
+            result.append(part)
+            continue
+        remove_object(part)
+        for piece in pieces:
+            piece.pp_role = ROLE_PART
+        result.extend(pieces)
+        split_any = True
+    return result, split_any
+
+
 def split_parts_local(parts, slab, parts_coll, debris=None, tangled=None):
     """Sever parts with a thin slab and keep the resulting pieces.
 
@@ -709,53 +734,36 @@ def create_parts(context, target, cuts, keep_original=True, part_gap=0.0,
     from . import surface  # local import: surface.py builds on this module
 
     for cut in cuts:
-        localized = surface.is_local(cut)
-        if localized:
-            # Cut Detail drives how finely the cut surface is built.
-            detail = get_settings(context).surface_resolution
-            cutter, problem, note = surface.build_cap_slab(
-                cut, target, scene, ring=max(48, min(detail * 2, 240)))
+        if surface.is_local(cut):
+            rings, normals, normal = surface.line_rings(cut, target)
+            if rings is None:
+                failures.append(
+                    f"Cut '{cut.name}': "
+                    f"{surface.cut_line_problem(cut) or 'no usable cut line'}")
+                continue
+            _usable, _problem, note = surface.loop_quality(cut,
+                                                           min_alignment=0.0)
             if note:
                 warnings.append(f"Cut '{cut.name}': {note}")
-            if problem is not None:
-                failures.append(f"Cut '{cut.name}': {problem}")
-                continue
-        else:
-            if cut.pp_cut_kind == 'SURFACE':
-                surface.refit_frame(cut)
-            cutter = build_cutter(cut, target, scene)
-        if cutter is None:
-            warnings.append(f"Cut '{cut.name}' has no usable geometry — skipped")
-            continue
-
-        if localized:
-            crumbs = [0]
-            knotted = [False]
-            parts, split_any = split_parts_local(parts, cutter, parts_coll,
-                                                 debris=crumbs,
-                                                 tangled=knotted)
-            if crumbs[0]:
-                warnings.append(
-                    f"Cut '{cut.name}': dropped {crumbs[0]} sliver(s) of no "
-                    "volume left where the cut grazed the surface")
+            parts, split_any = split_parts_surgery(parts, rings, normals,
+                                                   normal, scene, parts_coll)
             if not split_any:
                 # Say why, and leave it at that. Reaching further to force a
                 # separation would cut material outside the line, which is
                 # the one thing this mode promises not to do.
-                remove_object(cutter)
-                cutter = None
-                if knotted[0]:
-                    reason = ("the cut surface came out tangled, so the solver "
-                              "returned nothing. Nudge a point on the line, or "
-                              "lower Surface Detail, and try again")
-                else:
-                    reason = surface.failure_reason(None, cut, target)
-                failures.append(f"Cut '{cut.name}': {reason}")
-                continue
-        else:
-            parts, split_any = split_parts(parts, cutter, parts_coll)
-            if not split_any:
-                warnings.append(f"Cut '{cut.name}' did not split anything")
+                failures.append(
+                    f"Cut '{cut.name}': {surface.failure_reason(cut, target)}")
+            continue
+
+        if cut.pp_cut_kind == 'SURFACE':
+            surface.refit_frame(cut)
+        cutter = build_cutter(cut, target, scene)
+        if cutter is None:
+            warnings.append(f"Cut '{cut.name}' has no usable geometry — skipped")
+            continue
+        parts, split_any = split_parts(parts, cutter, parts_coll)
+        if not split_any:
+            warnings.append(f"Cut '{cut.name}' did not split anything")
         remove_object(cutter)
 
     context.view_layer.update()

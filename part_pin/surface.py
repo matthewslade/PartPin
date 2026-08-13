@@ -346,7 +346,16 @@ def usable_loop_indices(cut):
     return indices
 
 
-def failure_reason(probes, cut, target=None):
+def line_rings(cut, target):
+    """(rings, normals, cut normal) for a cut's lines, or three Nones.
+
+    The single entry point the cutter takes its lines from.
+    """
+    from . import mesh_cut  # local import: mesh_cut builds on this module
+    return mesh_cut.line_rings(cut, target)
+
+
+def failure_reason(cut, target=None):
     """Why a cut that spans its line did not separate anything, and where."""
     joined, holes = [], []
     if target is not None:
@@ -1138,35 +1147,34 @@ def trial_cut(cut, target, scene=None):
 
     Returns (pieces, joined_at, left_model).
     """
+    from . import mesh_cut  # local import: mesh_cut builds on this module
+
     scene = scene or bpy.context.scene
-    cap, problem, _warning = build_cap_slab(cut, target, scene)
-    if cap is None:
+    rings, normals, normal = mesh_cut.line_rings(cut, target)
+    if rings is None:
         return 0, [], []
+
     trial = core.duplicate_object(target, "PartPin_Trial", scene.collection)
     trial.hide_render = True
     pieces = 1
-    tangled = False
     try:
-        if core.boolean_apply(trial, cap, 'DIFFERENCE'):
-            parts = core.split_loose(trial)
-            kept, _crumbs = core.drop_debris(parts)
-            pieces = len(kept)
-            for part in kept:
+        cut_pieces, _problem = mesh_cut.cut_object(trial, rings, normals,
+                                                  normal, scene)
+        if cut_pieces is not None:
+            pieces = len(cut_pieces)
+            for part in cut_pieces:
                 core.remove_object(part)
-        else:
-            tangled = True
-            core.remove_object(trial)
     except Exception:
         pieces = 0
     finally:
-        core.remove_object(cap)
+        core.remove_object(trial)
 
     if pieces >= 2:
         JOIN_HINTS[cut.name] = {'joined': [], 'holes': [], 'tangled': False}
         return pieces, [], []
     joined, holes = find_join_hints(cut, target)
     JOIN_HINTS[cut.name] = {'joined': joined, 'holes': holes,
-                            'tangled': tangled}
+                            'tangled': False}
     return pieces, joined, holes
 
 
