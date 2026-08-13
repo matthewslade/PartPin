@@ -646,10 +646,17 @@ def apply_connector(parts, conn, scene, warnings):
     return True
 
 
-def create_parts(context, target, cuts, keep_original=True, part_gap=0.0):
-    """Run every enabled cut and connector; return (parts, applied, warnings)."""
+def create_parts(context, target, cuts, keep_original=True, part_gap=0.0,
+                 failures=None):
+    """Run every enabled cut and connector; return (parts, applied, warnings).
+
+    `failures` collects the reasons any cut could not be made, so the caller
+    can report them as errors rather than letting a cut fail silently.
+    """
     scene = context.scene
     warnings = []
+    if failures is None:
+        failures = []
 
     parts_coll = ensure_collection(scene, f"{target.name} Parts", unique=True)
     base = duplicate_object(target, f"{target.name}_part", parts_coll)
@@ -663,8 +670,16 @@ def create_parts(context, target, cuts, keep_original=True, part_gap=0.0):
         localized = surface.is_local(cut)
         if localized:
             resolution = get_settings(context).surface_resolution
-            cutter = surface.build_local_slab(cut, target, resolution, scene)
+            cutter, problem, note = surface.build_local_slab(
+                cut, target, resolution, scene)
+            if note:
+                warnings.append(f"Cut '{cut.name}': {note}")
+            if problem is not None:
+                failures.append(f"Cut '{cut.name}': {problem}")
+                continue
         else:
+            if cut.pp_cut_kind == 'SURFACE':
+                surface.refit_frame(cut)
             cutter = build_cutter(cut, target, scene)
         if cutter is None:
             warnings.append(f"Cut '{cut.name}' has no usable geometry — skipped")
@@ -673,10 +688,10 @@ def create_parts(context, target, cuts, keep_original=True, part_gap=0.0):
         if localized:
             parts, split_any = split_parts_local(parts, cutter, parts_coll)
             if not split_any:
-                warnings.append(
-                    f"Cut '{cut.name}' did not separate anything — its cut "
-                    "line may not close around a region, or Edge Margin is "
-                    "too small")
+                failures.append(
+                    f"Cut '{cut.name}' did not separate anything. Raise Edge "
+                    "Margin so the cut breaks through the surface, or check "
+                    "its line goes right round the part you want removed")
         else:
             parts, split_any = split_parts(parts, cutter, parts_coll)
             if not split_any:

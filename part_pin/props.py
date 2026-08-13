@@ -247,6 +247,13 @@ def register():
 
     # Surface-cut shape data (registered after PartPinControlPoint exists).
     bpy.types.Object.pp_points = CollectionProperty(type=PartPinControlPoint)
+    bpy.types.Object.pp_main_loop = IntProperty(
+        name="Main Cut Line",
+        description=("Which cut line sets this cut's plane — the last one "
+                     "edited. -1 picks the longest"),
+        default=-1,
+        options={'HIDDEN'},
+    )
     bpy.types.Object.pp_local = BoolProperty(
         name="Cut Inside Line Only",
         description=(
@@ -289,6 +296,6 @@ def unregister():
     for attr in (
         "pp_role", "pp_cut_kind", "pp_index", "pp_enabled",
         "pp_shape", "pp_clearance", "pp_pin_flip",
-        "pp_local", "pp_margin",
+        "pp_local", "pp_margin", "pp_main_loop",
     ):
         delattr(bpy.types.Object, attr)

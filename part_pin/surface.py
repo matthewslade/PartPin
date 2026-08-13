@@ -187,6 +187,163 @@ def newell_normal(points):
     return n
 
 
+def polygon_area(uvs):
+    """Signed shoelace area of a closed 2D polygon."""
+    total = 0.0
+    count = len(uvs)
+    for i in range(count):
+        x1, y1 = uvs[i]
+        x2, y2 = uvs[(i + 1) % count]
+        total += x1 * y2 - x2 * y1
+    return total * 0.5
+
+
+def polygon_perimeter(uvs):
+    count = len(uvs)
+    return sum(((uvs[(i + 1) % count][0] - uvs[i][0]) ** 2
+                + (uvs[(i + 1) % count][1] - uvs[i][1]) ** 2) ** 0.5
+               for i in range(count))
+
+
+def polygon_roundness(uvs):
+    """4πA/P²: 1 for a circle, ~0 for a sliver. Measures whether a cut line
+    still encloses a usable area once flattened onto the cut's plane."""
+    perimeter = polygon_perimeter(uvs)
+    if perimeter <= 1e-12:
+        return 0.0
+    return 4.0 * 3.141592653589793 * abs(polygon_area(uvs)) / (perimeter ** 2)
+
+
+def loop_length(points):
+    count = len(points)
+    return sum((points[(i + 1) % count] - points[i]).length
+               for i in range(count))
+
+
+def fit_plane(points):
+    """Best-fit plane through world points, as (origin, unit normal)."""
+    origin = sum(points, Vector()) / len(points)
+    normal = None
+    try:
+        import numpy as np
+        rows = np.array([[p.x - origin.x, p.y - origin.y, p.z - origin.z]
+                         for p in points])
+        # Smallest singular vector of the centred points = plane normal.
+        _u, _s, vh = np.linalg.svd(rows, full_matrices=False)
+        normal = Vector(tuple(float(x) for x in vh[-1]))
+    except Exception:
+        normal = None
+    if normal is None or normal.length < 1e-12:
+        normal = newell_normal(points)
+    if normal.length < 1e-12:
+        normal = Vector((0.0, 0.0, 1.0))
+    normal.normalize()
+    if normal.dot(newell_normal(points)) < 0.0:
+        normal = -normal
+    return origin, normal
+
+
+def refit_frame(cut):
+    """Re-align a surface cut's base plane to its current cut line.
+
+    A cut is stored as a height field over its own plane, so once the line
+    has been dragged well away from the plane it started on — a collar
+    round a limb, say, which ends up nearly perpendicular to the original
+    cut plane — that plane can no longer describe it and the enclosed
+    region flattens to nothing. Re-fitting the plane to the line keeps the
+    representation able to express whatever the user drew.
+
+    World positions of the control points and connectors are preserved.
+    """
+    loops = control_loops(cut)
+    matrix = cut.matrix_world
+    world = [[matrix @ p for p in loop] for loop in loops]
+    if not world or max(len(loop) for loop in world) < 3:
+        return False
+
+    # Fit to one line rather than to all of them at once: a cut has a single
+    # plane, and averaging lines lying in different planes gives a
+    # compromise that suits none of them. The line to follow is the one the
+    # user last edited, falling back to the longest.
+    main = None
+    if 0 <= cut.pp_main_loop < len(world) \
+            and len(world[cut.pp_main_loop]) >= 3:
+        main = world[cut.pp_main_loop]
+    if main is None:
+        main = max(world, key=loop_length)
+    origin, normal = fit_plane(main)
+    frame = Matrix.LocRotScale(origin, normal.to_track_quat('Z', 'Y'),
+                               Vector((1.0, 1.0, 1.0)))
+    inverse = frame.inverted()
+
+    connectors = [(c, c.matrix_world.copy())
+                  for c in core.cut_connectors(bpy.context.scene, cut)]
+    cut.matrix_world = frame
+    for conn, world_matrix in connectors:
+        conn.matrix_parent_inverse = inverse
+        conn.matrix_world = world_matrix
+
+    points, ids = [], []
+    for index, loop in enumerate(world):
+        for point in loop:
+            points.append(inverse @ point)
+            ids.append(index)
+    store_control_points(cut, points, ids)
+    return True
+
+
+def loop_quality(cut, minimum_roundness=0.02, min_alignment=0.7):
+    """Sort a cut's lines into usable and not.
+
+    Returns (usable polygons, problem, warning). A cut has one plane, so
+    lines that no longer share it — the leftovers on other features after
+    one line has been dragged round a limb — cannot be cut alongside it.
+    Those are skipped with a warning rather than failing the whole cut. A
+    line qualifies when it encloses an area, does not cross itself, and its
+    own plane is within ~45° of the cut's.
+    """
+    loops = control_loops(cut)
+    if not loops:
+        return [], "this cut has no cut line to work from", None
+
+    usable = []
+    for index, loop in enumerate(loops):
+        poly = [(p.x, p.y) for p in loop]
+        if polygon_roundness(poly) < minimum_roundness \
+                or polygon_self_intersects(poly):
+            continue
+        if len(loop) >= 3:
+            _origin, normal = fit_plane(loop)
+            if abs(normal.z) < min_alignment:  # local Z is the cut normal
+                continue
+        usable.append(index)
+    if not usable:
+        if len(loops) == 1:
+            return [], ("this cut line does not enclose an area to cut off. "
+                        "Drag its points into a loop that goes right round "
+                        "the part you want removed"), None
+        return [], ("none of this cut's lines enclose an area to cut off"), None
+
+    warning = None
+    skipped = len(loops) - len(usable)
+    if skipped:
+        warning = (f"{skipped} of {len(loops)} cut lines were ignored — they "
+                   "do not share a plane with the rest. Hover each one and "
+                   "press Alt+X to remove it, or use a separate cut per region")
+    return usable, None, warning
+
+
+def usable_loop_indices(cut):
+    indices, _problem, _warning = loop_quality(cut)
+    return indices
+
+
+def cut_line_problem(cut, minimum_roundness=0.02):
+    """Why this cut cannot be made at all, or None if it can."""
+    _usable, problem, _warning = loop_quality(cut, minimum_roundness)
+    return problem
+
+
 def polygon_self_intersects(uvs):
     """True if the closed 2D polygon crosses itself (O(n²), n is small)."""
     n = len(uvs)
@@ -346,8 +503,16 @@ def store_control_points(cut, points, loop_ids):
         item.loop = loop_id
 
 
-def field_for(cut):
-    return HeightField(control_points(cut), falloff=cut.pp_falloff)
+def field_for(cut, indices=None):
+    """The cut's surface. Lines that cannot be cut in this cut's plane are
+    left out, so a stray off-plane line does not warp the whole surface."""
+    loops = control_loops(cut)
+    if not loops:
+        return HeightField([], falloff=cut.pp_falloff)
+    if indices is None:
+        indices = usable_loop_indices(cut) or list(range(len(loops)))
+    points = [p for i in indices for p in loops[i]]
+    return HeightField(points or control_points(cut), falloff=cut.pp_falloff)
 
 
 def world_polylines(cut):
@@ -406,7 +571,9 @@ def build_display_mesh(cut, target, resolution=DISPLAY_RES):
     """
     patch = None
     if is_local(cut):
-        patch = patch_grid(cut, target, resolution)
+        usable, _problem, _warning = loop_quality(cut)
+        if usable:
+            patch = patch_grid(cut, target, resolution, indices=usable)
     if patch is not None:
         bm = _patch_bm(patch, thickness=0.0)
     else:
@@ -522,7 +689,7 @@ def _dilate(mask, n, steps):
     return mask
 
 
-def patch_grid(cut, target, resolution, margin=None):
+def patch_grid(cut, target, resolution, margin=None, indices=None):
     """Grid over the cut, with a mask of the cells to actually cut.
 
     The mask is *where the cut surface runs through the model*, restricted
@@ -531,10 +698,13 @@ def patch_grid(cut, target, resolution, margin=None):
     it from real inside/outside tests rather than from the cut line's
     outline keeps it correct however far the reshaped surface has moved.
     """
-    polys = loop_polygons(cut)
+    loops = control_loops(cut)
+    if indices is None:
+        indices = usable_loop_indices(cut) or list(range(len(loops)))
+    polys = [[(p.x, p.y) for p in loops[i]] for i in indices]
     if not polys:
         return None
-    field = field_for(cut)
+    field = field_for(cut, indices)
     us = [u for poly in polys for u, _v in poly]
     vs = [v for poly in polys for _u, v in poly]
     span = max(max(us) - min(us), max(vs) - min(vs), 1e-9)
@@ -560,14 +730,22 @@ def patch_grid(cut, target, resolution, margin=None):
     keep = [[False] * n for _ in range(n)]
     labels, count = _label_regions(inside, n)
     if count:
-        # Keep only the region(s) the cut lines enclose.
+        # Keep the region(s) this cut's lines enclose. A cell seeds a region
+        # if it is inside the model and either within the line or hugging
+        # it: cells just inside the line are in the enclosed region, while
+        # cells just outside it are outside the model and cannot seed. That
+        # holds even when the flattened line is an awkward shape, which a
+        # point-in-polygon test alone does not.
+        band = max(grow * 2.0, max(du, dv) * 1.5)
         wanted = set()
         for i in range(n):
             for j in range(n):
                 if labels[i][j] < 0:
                     continue
                 u, v = centres[i * n + j]
-                if inside_loops(u, v, polys, grow):
+                near = any(_distance_to_loop(u, v, poly) <= band
+                           for poly in polys)
+                if near or inside_loops(u, v, polys):
                     wanted.add(labels[i][j])
         if wanted:
             for i in range(n):
@@ -659,20 +837,30 @@ def build_local_slab(cut, target, resolution=48, scene=None):
     """Thin closed slab spanning only the cut's ring-fenced region.
 
     Subtracting this severs the model along the cut line and nowhere else;
-    the pieces then fall out as separate connected components.
+    the pieces then fall out as separate connected components. Returns
+    (object, problem, warning).
     """
     scene = scene or bpy.context.scene
-    patch = patch_grid(cut, target, resolution)
+    # The cut line may have been dragged away from the plane the cut began
+    # on; re-fit before measuring anything in that plane.
+    refit_frame(cut)
+    usable, problem, warning = loop_quality(cut)
+    if problem is not None:
+        return None, problem, warning
+
+    patch = patch_grid(cut, target, resolution, indices=usable)
     if patch is None:
-        return None
+        return None, ("this cut's surface never passes through the model "
+                      "inside its cut line — check the line lies on the "
+                      "model"), warning
     bm = _patch_bm(patch)
     if not bm.faces:
         bm.free()
-        return None
+        return None, "this cut covers no area of the model", warning
     obj = core.new_mesh_object("PartPin_Slab", bm, scene.collection,
                                matrix=cut.matrix_world.copy())
     obj.hide_render = True
-    return obj
+    return obj, None, warning
 
 
 def build_surface_cutter(cut, target, resolution=48, scene=None):

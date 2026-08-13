@@ -937,6 +937,221 @@ def scenario_delete_loop(core):
           len(cut.pp_points) == 12, f"got {len(cut.pp_points)}")
 
 
+def make_limb(core):
+    """A limb along X with a head on the end — the shape from issue #1."""
+    import bmesh as bm_mod
+    from mathutils import Matrix
+    bm = bm_mod.new()
+    bm_mod.ops.create_cone(bm, cap_ends=True, cap_tris=False, segments=32,
+                           radius1=0.4, radius2=0.4, depth=6.0)
+    bm_mod.ops.rotate(bm, verts=bm.verts, cent=(0, 0, 0),
+                      matrix=Matrix.Rotation(math.radians(90), 3, 'Y'))
+    mesh = bpy.data.meshes.new("Limb")
+    bm.to_mesh(mesh)
+    bm.free()
+    obj = link(bpy.data.objects.new("Limb", mesh))
+
+    bm = bm_mod.new()
+    bm_mod.ops.create_uvsphere(bm, u_segments=32, v_segments=16, radius=0.9)
+    for v in bm.verts:
+        v.co.x += 3.0
+    head_mesh = bpy.data.meshes.new("head")
+    bm.to_mesh(head_mesh)
+    bm.free()
+    head = link(bpy.data.objects.new("head", head_mesh))
+
+    mod = obj.modifiers.new("u", 'BOOLEAN')
+    mod.object, mod.operation, mod.solver = head, 'UNION', 'EXACT'
+    dg = bpy.context.evaluated_depsgraph_get()
+    obj.data = bpy.data.meshes.new_from_object(obj.evaluated_get(dg))
+    obj.modifiers.clear()
+    bpy.data.objects.remove(head)
+    bpy.context.view_layer.update()
+    return obj
+
+
+def collar_points(surface_mod, model, cut, x=2.0, radius=0.55, count=16):
+    """A cut line dragged right round the limb — a loop that ends up nearly
+    perpendicular to the plane the cut started on."""
+    points = []
+    for i in range(count):
+        angle = 2.0 * math.pi * i / count
+        world = surface_mod.project_to_surface(
+            model, Vector((x, radius * math.cos(angle),
+                           radius * math.sin(angle))))
+        points.append(cut.matrix_world.inverted() @ world)
+    return points
+
+
+def scenario_collar_cut(core):
+    """Issue #1: a line dragged round a limb used to cut nothing at all."""
+    print("Scenario: line dragged right round a limb (issue #1)")
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    from part_pin import surface
+
+    bpy.ops.partpin.add_plane_cut()  # Z axis: slices the limb lengthwise
+    cut = bpy.context.view_layer.objects.active
+    cut, _error = surface.convert_to_surface(bpy.context, cut, model,
+                                            per_loop=16)
+    before = cut.matrix_world.to_quaternion() @ Vector((0.0, 0.0, 1.0))
+    check("cut starts out normal to Z", abs(before.z) > 0.99)
+
+    surface.store_control_points(cut, collar_points(surface, model, cut),
+                                [0] * 16)
+    flat = max(surface.polygon_roundness(p)
+               for p in surface.loop_polygons(cut))
+    check("collar is degenerate in the original plane (the bug)", flat < 0.01,
+          f"roundness {flat:.4f}")
+
+    surface.refit_frame(cut)
+    after = cut.matrix_world.to_quaternion() @ Vector((0.0, 0.0, 1.0))
+    check("re-fitted plane now faces along the limb", abs(after.x) > 0.99,
+          f"normal {tuple(round(v, 2) for v in after)}")
+    round_now = max(surface.polygon_roundness(p)
+                    for p in surface.loop_polygons(cut))
+    check("collar encloses a proper area after re-fitting", round_now > 0.8,
+          f"roundness {round_now:.4f}")
+    check("no problem reported for the collar",
+          surface.cut_line_problem(cut) is None,
+          str(surface.cut_line_problem(cut)))
+
+    failures = []
+    parts, _applied, _warnings = core.create_parts(
+        bpy.context, model, [cut], keep_original=True, failures=failures)
+    check("collar cut separates the limb", len(parts) == 2,
+          f"got {len(parts)}: {failures}")
+    for p in parts:
+        check(f"part closed: {p.name}", is_closed(core, p))
+    if len(parts) != 2:
+        return
+    check("no failures reported", not failures, str(failures))
+
+    ends = sorted((core.world_bbox(p)[0].x, core.world_bbox(p)[1].x)
+                  for p in parts)
+    check("split runs across the limb at the collar, not lengthwise",
+          abs(ends[0][1] - 2.0) < 0.15 and abs(ends[1][0] - 2.0) < 0.15,
+          f"x ranges {[(round(a, 2), round(b, 2)) for a, b in ends]}")
+
+
+def scenario_collar_full_extent(core):
+    """The same line with localization off should follow the line's plane,
+    not the plane the cut happened to start on."""
+    print("Scenario: re-fitting also fixes full-extent cuts")
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    from part_pin import surface
+
+    bpy.ops.partpin.add_plane_cut()
+    cut = bpy.context.view_layer.objects.active
+    cut, _error = surface.convert_to_surface(bpy.context, cut, model,
+                                            per_loop=16)
+    surface.store_control_points(cut, collar_points(surface, model, cut),
+                                [0] * 16)
+    cut.pp_local = False
+
+    failures = []
+    parts, _applied, _warnings = core.create_parts(
+        bpy.context, model, [cut], keep_original=True, failures=failures)
+    check("full-extent collar cut gives two parts", len(parts) == 2,
+          f"got {len(parts)}: {failures}")
+    if len(parts) != 2:
+        return
+    # Lengthwise (the old, wrong result) would give two parts of the full
+    # length; across the limb gives one short and one long part.
+    lengths = sorted(core.world_bbox(p)[1].x - core.world_bbox(p)[0].x
+                     for p in parts)
+    check("cut follows the line's plane, not the original Z plane",
+          lengths[0] < 2.5 and lengths[1] > 4.0,
+          f"part lengths {[round(x, 2) for x in lengths]}")
+
+
+def scenario_collar_plus_leftover_line(core):
+    """A plane cut picks up a line on every feature it crosses. Reshaping one
+    into a collar leaves the others in a different plane — the collar should
+    still cut, with the leftovers reported rather than silently dropped."""
+    print("Scenario: collar plus a leftover line from another feature")
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    from part_pin import surface
+
+    bpy.ops.partpin.add_plane_cut()
+    cut = bpy.context.view_layer.objects.active
+    cut, _error = surface.convert_to_surface(bpy.context, cut, model,
+                                            per_loop=16)
+    # Line 0 becomes the collar; line 1 is a leftover lengthwise line.
+    collar = collar_points(surface, model, cut)
+    leftover = []
+    for i in range(10):
+        angle = 2.0 * math.pi * i / 10
+        world = surface.project_to_surface(
+            model, Vector((-1.0 + 0.8 * math.cos(angle),
+                           0.42 * math.sin(angle), 0.0)))
+        leftover.append(cut.matrix_world.inverted() @ world)
+    surface.store_control_points(cut, collar + leftover,
+                                [0] * 16 + [1] * 10)
+    cut.pp_main_loop = 0  # the collar is what the user was editing
+
+    surface.refit_frame(cut)
+    usable, problem, warning = surface.loop_quality(cut)
+    check("only the collar survives as usable", usable == [0],
+          f"usable lines {usable}")
+    check("no hard failure", problem is None, str(problem))
+    check("the leftover line is reported",
+          warning is not None and "Alt+X" in warning, str(warning))
+
+    failures = []
+    warns = []
+    parts, _applied, warns = core.create_parts(
+        bpy.context, model, [cut], keep_original=True, failures=failures)
+    check("the collar still cuts", len(parts) == 2,
+          f"got {len(parts)}: {failures}")
+    check("the ignored line comes through as a warning",
+          any("ignored" in w for w in warns), str(warns))
+    for p in parts:
+        check(f"part closed: {p.name}", is_closed(core, p))
+
+
+def scenario_unusable_line_reports(core):
+    print("Scenario: a line that encloses nothing says so")
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    from part_pin import surface
+
+    bpy.ops.partpin.add_plane_cut()
+    cut = bpy.context.view_layer.objects.active
+    cut, _error = surface.convert_to_surface(bpy.context, cut, model,
+                                            per_loop=12)
+    # Collapse the line onto a straight path along the limb: it doubles back
+    # on itself and fences no region at all.
+    points = []
+    for i in range(12):
+        t = i / 11.0 if i < 6 else (11 - i) / 11.0
+        world = surface.project_to_surface(
+            model, Vector((-2.5 + 5.0 * t, 0.0, 0.45)))
+        points.append(cut.matrix_world.inverted() @ world)
+    surface.store_control_points(cut, points, [0] * 12)
+
+    problem = surface.cut_line_problem(cut)
+    check("unusable line is reported, not silently ignored",
+          problem is not None and "enclose" in problem, str(problem))
+
+    failures = []
+    parts, _applied, _warnings = core.create_parts(
+        bpy.context, model, [cut], keep_original=True, failures=failures)
+    check("create_parts surfaces the reason", len(failures) == 1,
+          str(failures))
+    check("model is left in one piece", len(parts) == 1, f"got {len(parts)}")
+
+
 def scenario_modal_helpers(core):
     """Drive the modal operator's logic directly (everything but the GPU)."""
     print("Scenario: surface-edit modal helpers")
@@ -1042,6 +1257,10 @@ def main():
     scenario_local_seam(core)
     scenario_local_display(core)
     scenario_delete_loop(core)
+    scenario_collar_cut(core)
+    scenario_collar_full_extent(core)
+    scenario_collar_plus_leftover_line(core)
+    scenario_unusable_line_reports(core)
     scenario_modal_helpers(core)
     scenario_operators_registered(core)
     scenario_export(core)  # runs easy mode internally, then exports

@@ -73,9 +73,16 @@ Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
    thin stalk comes off intact), because the region is found by following
    the model, not by clipping to the line's outline.
 
+   Drag the line as far as you like — right round a limb, even to a
+   plane at right angles to where the cut started. The cut's plane
+   re-fits itself to the line you are editing, so the region it fences
+   is always one it can actually cut.
+
    A cut picks up a line on **every** feature it crosses, and each one
    cuts. Hover a line and press **Alt+X** to drop the ones you don't
-   want. If a cut refuses to separate a region, raise *Edge Margin* — it
+   want. Lines that end up in a different plane from the one you are
+   editing cannot be cut alongside it: those are skipped and reported,
+   so use a separate cut for each region facing a different way. If a cut refuses to separate a region, raise *Edge Margin* — it
    controls how far past the line the cut reaches to break through the
    surface. Untick *Cut Inside Line Only* for the old behaviour of
    splitting everything the surface meets.
@@ -159,9 +166,12 @@ On macOS the binary is usually
   model — 0.02 mm on a 200 mm print), so the two faces mate with a gap far
   below what a printer resolves.
 - A localized cut needs its line to close around a region. If the line
-  runs off the model, or *Edge Margin* is too small to break through the
-  surface, the cut reports that it separated nothing rather than
-  silently doing the wrong thing.
+  runs off the model, doubles back so it fences nothing, or *Edge Margin*
+  is too small to break through the surface, the cut says so instead of
+  silently doing nothing.
+- One cut has one plane. Lines facing more than about 45° away from the
+  line you last edited are skipped with a warning — give each such region
+  its own cut.
 - Modifiers on the model are baked into the parts.
 - Work on one model at a time; *Clear All Cuts* resets the drafts.
 

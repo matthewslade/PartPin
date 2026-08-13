@@ -481,13 +481,17 @@ class PARTPIN_OT_create_parts(bpy.types.Operator):
             self.report({'ERROR'}, "Add at least one cut first")
             return {'CANCELLED'}
 
+        failures = []
         parts, applied, warnings = core.create_parts(
             context, target, cuts,
             keep_original=s.keep_original,
             part_gap=s.part_gap,
+            failures=failures,
         )
         for w in warnings:
             self.report({'WARNING'}, w)
+        for f in failures:
+            self.report({'ERROR'}, f)
 
         if s.keep_original:
             core.hide_drafts(scene, True)
@@ -551,16 +555,20 @@ class PARTPIN_OT_easy_cut(bpy.types.Operator):
         conns = [core.make_connector_object(context, cut, m)
                  for m in matrices]
 
+        failures = []
         parts, applied, warnings = core.create_parts(
             context, target, [cut],
             keep_original=s.keep_original,
             part_gap=s.part_gap,
+            failures=failures,
         )
         for conn in conns:
             core.remove_object(conn)
         core.remove_object(cut)
         for w in warnings:
             self.report({'WARNING'}, w)
+        for f in failures:
+            self.report({'ERROR'}, f)
 
         if parts:
             s.parts_collection = parts[0].users_collection[0]

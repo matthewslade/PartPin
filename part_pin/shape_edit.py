@@ -95,7 +95,10 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
             return {'CANCELLED'}
 
         self.cut = cut
+        # Points are stored in the cut's own space and re-fitting moves that
+        # space, so the snapshot has to remember the frame it belongs to.
         self.snapshot = [(Vector(p.co), p.loop) for p in cut.pp_points]
+        self.snapshot_matrix = cut.matrix_world.copy()
         self.falloff_start = cut.pp_falloff
         self.was_hidden = cut.hide_get()
         cut.hide_set(True)  # only the cut line should be visible
@@ -124,6 +127,18 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         self.area.tag_redraw()
         self.report({'INFO'}, "Drag the points on the model to shape the cut")
         return {'RUNNING_MODAL'}
+
+    def _update_status(self, context):
+        """Keep the footer honest: say so as soon as the line stops
+        enclosing a cuttable region, rather than at Create Parts time."""
+        problem = None
+        if self.cut.pp_local:
+            problem = surface.cut_line_problem(self.cut)
+        if problem:
+            context.workspace.status_text_set(
+                "CANNOT CUT: " + problem.split(' — ')[0] + "    " + STATUS)
+        else:
+            context.workspace.status_text_set(STATUS)
 
     def _pick_cut(self, context):
         active = context.view_layer.objects.active
@@ -258,6 +273,7 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         items.insert(after + 1, (clicked, items[after][1]))
         surface.store_control_points(self.cut, [c for c, _l in items],
                                      [l for _c, l in items])
+        self.cut.pp_main_loop = items[after][1]
         self.moved = True
         self._rebuild_cache()
 
@@ -290,6 +306,8 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
                  in enumerate(sorted({loop for _co, loop in kept}))}
         surface.store_control_points(self.cut, [co for co, _l in kept],
                                      [order[l] for _co, l in kept])
+        # Loop ids shift down, so follow the main line across or forget it.
+        self.cut.pp_main_loop = order.get(self.cut.pp_main_loop, -1)
         self.hover = -1
         self.moved = True
         self._rebuild_cache()
@@ -348,6 +366,16 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
                     self.dragging = index
                 return {'RUNNING_MODAL'}
             if event.value == 'RELEASE':
+                if self.dragging >= 0:
+                    # Keep the cut's plane aligned to the line as it moves,
+                    # so dragging it right round a limb still describes a
+                    # region that can be cut. The line being edited is the
+                    # one the plane should follow.
+                    self.cut.pp_main_loop = \
+                        self.cut.pp_points[self.dragging].loop
+                    surface.refit_frame(self.cut)
+                    self._rebuild_cache()
+                    self._update_status(context)
                 self.dragging = -1
                 return {'RUNNING_MODAL'}
 
@@ -370,6 +398,7 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
     def _confirm(self, context):
         self._finish(context)
         cut = self.cut
+        surface.refit_frame(cut)
         surface.build_display_mesh(cut, self.target)
         cut.hide_set(self.was_hidden)
 
@@ -383,10 +412,19 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         if snapped:
             message += f", {snapped} connector(s) snapped to it"
         self.report({'INFO'}, message)
+        problem = surface.cut_line_problem(cut) if cut.pp_local else None
+        if problem:
+            self.report({'ERROR'}, f"This cut cannot be made yet: {problem}")
         return {'FINISHED'}
 
     def _cancel(self, context):
         self._finish(context)
+        connectors = [(c, c.matrix_world.copy())
+                      for c in core.cut_connectors(context.scene, self.cut)]
+        self.cut.matrix_world = self.snapshot_matrix
+        for conn, world in connectors:
+            conn.matrix_parent_inverse = self.snapshot_matrix.inverted()
+            conn.matrix_world = world
         surface.store_control_points(
             self.cut, [co for co, _l in self.snapshot],
             [l for _co, l in self.snapshot])
