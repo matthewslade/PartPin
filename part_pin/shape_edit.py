@@ -17,12 +17,6 @@ LINE_COLOR = (1.0, 0.62, 0.16, 1.0)
 LINE_COLOR_HIDDEN = (1.0, 0.62, 0.16, 0.22)
 POINT_COLOR = (0.96, 0.96, 0.96, 1.0)
 
-# Trouble spots found along the cut line, by kind.
-PROBE_COLORS = {
-    surface.PROBE_BRIDGE: (1.0, 0.15, 0.15, 1.0),  # red: holds the piece on
-    surface.PROBE_MARGIN: (1.0, 0.78, 0.0, 1.0),   # amber: needs more reach
-    surface.PROBE_STUCK: (0.65, 0.35, 1.0, 1.0),   # violet: line off material
-}
 JOINED_COLOR = (1.0, 0.15, 0.15, 1.0)     # still joined: material wraps round
 HOLE_COLOR = (0.55, 0.4, 1.0, 1.0)        # the cut leaves the model here
 CAP_COLOR = (1.0, 0.62, 0.16, 0.16)       # the lid that will do the cutting
@@ -144,11 +138,9 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         self._cap_tris = []
         self._joined = []
         self._holes = []
-        self._probe_points = {}
-        self.probe_summary = ""
+        self._verdict = ""
         self._rebuild_cache()
         self._rebuild_cap()
-        self._rebuild_hints()
 
         self._handle = bpy.types.SpaceView3D.draw_handler_add(
             self._draw, (context,), 'WINDOW', 'POST_VIEW')
@@ -172,27 +164,6 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
             context.workspace.status_text_set(self._verdict + "    " + STATUS)
         else:
             context.workspace.status_text_set(STATUS)
-
-    def _run_probe(self, context, announce=False):
-        """Test the line against the model and mark the spots that won't cut."""
-        self._probe_points = {}
-        self.probe_summary = ""
-        if not self.cut.pp_local:
-            return
-        try:
-            probes = surface.probe_cut_line(self.cut, self.target)
-        except Exception:
-            return
-        bad, _suggested, summary = surface.probe_summary(probes, self.cut)
-        for probe in bad:
-            self._probe_points.setdefault(probe['status'], []).append(
-                probe['position'])
-        self.probe_summary = summary if bad else ""
-        if announce:
-            self.report({'INFO'} if not bad else {'WARNING'}, summary)
-        self._update_status(context)
-        if self.area:
-            self.area.tag_redraw()
 
     def _pick_cut(self, context):
         active = context.view_layer.objects.active
@@ -566,15 +537,6 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
             for line in self._cache['polylines']:
                 _draw_lines(line, LINE_COLOR_HIDDEN, 2.0, 'NONE')
                 _draw_lines(line, LINE_COLOR, 3.0, 'LESS_EQUAL')
-
-            # Where the cut cannot break through, marked on the line itself.
-            for status, points in (self._probe_points or {}).items():
-                colour = PROBE_COLORS.get(status)
-                if not points or colour is None:
-                    continue
-                _draw_points(points, (colour[0], colour[1], colour[2], 0.35),
-                             15.0)
-                _draw_points(points, colour, 9.0)
 
             world = self._cache.get('drawn') or self._cache['world']
             plain = [w for i, w in enumerate(world)

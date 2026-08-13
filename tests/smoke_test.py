@@ -1913,6 +1913,80 @@ def scenario_cut_object_shows_the_lid(core):
           f"{max(hi - lo):.2f} vs line span {line_span:.2f}")
 
 
+def scenario_operator_wiring_audit(core):
+    """Every self.helper() an operator calls, and every self.thing it reads,
+    must exist.
+
+    Renaming a helper and missing a call site fails only in the running app,
+    on whichever click reaches it — a modal's invoke cannot be exercised
+    headlessly, so this reads the code instead of running it.
+    """
+    print("Scenario: operator wiring audit")
+    import ast
+    import inspect
+    from part_pin import draw_cut, ops, shape_edit
+
+    # Provided by Blender on the instance rather than the class, so not
+    # visible on the class itself.
+    from_blender = {'report', 'layout', 'properties', 'options', 'has_reports',
+                    'bl_rna', 'as_keywords', 'poll_message_set'}
+    missing_calls, missing_reads = [], []
+    for module in (shape_edit, draw_cut, ops):
+        tree = ast.parse(inspect.getsource(module))
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            cls = getattr(module, node.name, None)
+            if cls is None:
+                continue
+            known = (set(dir(cls)) | from_blender
+                     | set(getattr(cls, '__annotations__', {})))
+            assigned = {
+                target.attr
+                for sub in ast.walk(node)
+                if isinstance(sub, (ast.Assign, ast.AugAssign, ast.AnnAssign))
+                for target in (sub.targets if isinstance(sub, ast.Assign)
+                               else [sub.target])
+                if isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == 'self'
+            }
+            for sub in ast.walk(node):
+                if not (isinstance(sub, ast.Attribute)
+                        and isinstance(sub.value, ast.Name)
+                        and sub.value.id == 'self'):
+                    continue
+                if sub.attr in known or sub.attr in assigned:
+                    continue
+                if isinstance(sub.ctx, ast.Load):
+                    missing_reads.append(f"{module.__name__}.{node.name}"
+                                         f".{sub.attr}")
+
+    for module in (shape_edit, draw_cut, ops):
+        tree = ast.parse(inspect.getsource(module))
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            cls = getattr(module, node.name, None)
+            if cls is None:
+                continue
+            known = (set(dir(cls)) | from_blender
+                     | set(getattr(cls, '__annotations__', {})))
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.Call)
+                        and isinstance(sub.func, ast.Attribute)
+                        and isinstance(sub.func.value, ast.Name)
+                        and sub.func.value.id == 'self'
+                        and sub.func.attr not in known):
+                    missing_calls.append(f"{module.__name__}.{node.name}"
+                                         f".{sub.func.attr}()")
+
+    check("every self.helper() call resolves to a method",
+          not missing_calls, str(sorted(set(missing_calls))))
+    check("every self.attribute read is set somewhere",
+          not missing_reads, str(sorted(set(missing_reads))))
+
+
 def scenario_modal_helpers(core):
     """Drive the modal operator's logic directly (everything but the GPU)."""
     print("Scenario: surface-edit modal helpers")
@@ -2037,6 +2111,7 @@ def main():
     scenario_line_hugs_surface(core)
     scenario_cap_preview(core)
     scenario_cut_object_shows_the_lid(core)
+    scenario_operator_wiring_audit(core)
     scenario_modal_helpers(core)
     scenario_operators_registered(core)
     scenario_export(core)  # runs easy mode internally, then exports
