@@ -83,16 +83,15 @@ around while editing.
 
 ### The warnings
 
-After every drag, the cut is measured against your model and anything wrong
-with it is marked where it is wrong. A cut with nothing wrong is marked nothing
-at all.
+After every drag, the line is measured against your model and anything wrong
+with it is marked where it is wrong. A line with nothing wrong is marked nothing
+at all — there is one thing left that can be wrong with a line, because the cut
+is made along the model's own surface and so cannot go anywhere the line does
+not.
 
 | Mark | Meaning | What to do |
 | --- | --- | --- |
-| **Red** | The cut surface folds onto itself there. The solver cannot use a folded surface and returns nothing, which is the commonest reason a cut does nothing at all | Spread those points apart, or take the line a shorter way round |
-| **Amber** | The cut cannot break out of the model there, so material wraps round it and holds the piece on | Move the line to where the piece is clear of what holds it, or raise *Undercut* |
 | **Yellow** | The line has come off the model there | Drag those points back onto it |
-| **Violet** | The cut runs through open space well inside the line, so the line encloses more than solid material | Bring the line in closer round the piece |
 
 Press **T** at any point for a straight answer: *"This cut separates into 2
 parts"*, or what is stopping it.
@@ -131,20 +130,19 @@ click for simple models: pick an axis, then **Cut at Center** or **At Cursor**.
 
 ## What the cut actually does
 
-Your perimeter is spanned by a lid — a surface drawn inwards from the line —
-and that lid, thickened to a hair, is what cuts. So **the perimeter decides
-everything**: there is no plane to flatten your line onto, and nothing reaching
-sideways into the model.
+Your model's own surface is cut along the line you drew, the two sides of that
+cut are parted, and each is capped with the same polygon. Nothing is invented
+to cut with, so **the perimeter decides everything**: there is no plane to
+flatten your line onto, and nothing reaching sideways into the model.
+
+The seam is the line — not a surface fitted near it. Nothing at all is spent at
+the seam either: the two parts add back up to exactly the model you started
+with, and they mate face to face.
 
 Only the material inside the line is cut. Draw round an arm at the armpit and
 the arm comes away with the body left whole, even though the cut's plane would
-carry on through it. About 0.01% of the model's volume is spent at the seam,
-far below what a printer resolves.
-
-The lid's rim steps out through the model's surface to break the piece free —
-following the surface's own outward normal, so at a crease it steps out of the
-crease rather than into the body. *Undercut* lets it reach further, for a piece
-that starts buried inside another part of the model.
+carry on through it. Anything the line runs *across* — a strap, a fin — is cut
+where it crosses, because that is what drawing the line over it asks for.
 
 ## Settings worth knowing
 
@@ -170,34 +168,27 @@ binary is usually `/Applications/Blender.app/Contents/MacOS/Blender`.
 
 ## If a cut will not separate
 
-**Untick "Cut Inside Line Only".** That cuts along your drawn surface all the
-way through the model, using a cutter that is a height over a plane extruded
-into a solid — it cannot fold onto itself, so it always produces two clean,
-closed parts. It takes more of the model with the piece than the line asks
-for, which you can trim afterwards, but it works when the tighter cut will
-not.
+Press **T** first — it makes the cut on a copy and tells you what happened,
+which beats guessing.
 
-The tighter, line-only cut is the better result when it works, and it is not
-yet reliable on dense sculpts: see the limits below.
+If the line itself cannot be cut into the surface, **untick "Cut Inside Line
+Only"**. That cuts along your drawn surface all the way through the model,
+using a cutter that is a height over a plane extruded into a solid, so it
+always produces two clean, closed parts. It takes more of the model with the
+piece than the line asks for, which you can trim afterwards.
 
 ## Working on this
 
-The localized cut is being rebuilt — see
-[docs/NEXT-mesh-surgery-cutter.md](docs/NEXT-mesh-surgery-cutter.md) for why the
-current one is not sound on dense sculpts, what replaces it, what has already
-been tried and rejected, and the bar the replacement has to clear.
+See [docs/NEXT-mesh-surgery-cutter.md](docs/NEXT-mesh-surgery-cutter.md) for how
+the cutter works, what was measured on the way to it, what has already been
+tried and rejected, and what is still left to clear out behind it.
 
 ## Limits worth knowing
 
-- **The cut surface can fold onto itself** on an awkward line, and the exact
-  solver then returns nothing rather than a cut. It is marked in red where that
-  happens, and lowering *Cut Detail* or spreading the points usually clears it.
-  This is the roughest edge in the tool.
-- A cut only separates a piece attached **inside** the line. If something
-  crosses the line — a strap, a fin, a spike — the piece cannot come away
-  without cutting that too, and the cut says so rather than doing it.
-- Boolean cutting is exact but not instant: multi-million-poly meshes take a
-  while. Cut before subdividing where you can.
+- A cut separates the piece the line rings off. Anything the line crosses is cut
+  along with it, so draw round the piece rather than across what holds it.
+- Cutting is exact but not instant: multi-million-poly meshes take a while. Cut
+  before subdividing where you can.
 - One cut has one plane. Lines facing more than about 45° away from the one you
   last edited are skipped with a warning — give each such region its own cut.
 - Drawing and dragging follow the visible surface, so orbit first to reach the

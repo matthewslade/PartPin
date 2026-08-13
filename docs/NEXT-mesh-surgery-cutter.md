@@ -1,13 +1,41 @@
-# Next job: cut the model's own surface instead of synthesising a lid
+# Cut the model's own surface instead of synthesising a lid
 
-**Status:** the localized cut ("Cut Inside Line Only", the default) is not
-reliable on dense sculpts. This document says why, what to build instead, what
-has already been tried and failed, and how to prove the new thing works.
+**Status: built.** `part_pin/mesh_cut.py` is the cutter now, and the whole
+suite passes three runs running. What is left is clearing out what it replaced
+— see "Still to do" at the bottom.
 
-Written at the end of a long session by the agent who built the current cutter.
-The diagnosis is well evidenced; the current implementation is not sound. Read
-"What has already been tried" before writing code — several plausible fixes have
-already been measured and rejected.
+The diagnosis below stands. The **plan** did not survive being measured, in one
+important way, so read this first:
+
+### What the measurements changed
+
+- **The height field's own section cannot be used to cut along** (step 3 of the
+  sketch below). Through the armpit on `make_shoulder_arm` the section comes out
+  as a *single* loop that rings the arm **and** the body, so cutting along it
+  slices the body — issue #3 all over again, by construction. The section is
+  also tied to the model's tessellation: on a 12-triangle cube it misses the
+  drawn line by 14% of the model's size, and blanket-subdividing to close that
+  gap costs 26k faces and still only reaches 0.44%.
+- **What works instead:** stand a thin band along the drawn line itself and let
+  `bpy.ops.mesh.intersect` cut the model's faces where the band crosses them.
+  The seam then lands on the line *exactly* — 0.0001% of the model's size on a
+  limb, 0.0000% on a cube, against a 0.2% bar.
+- **The band's height cannot be tuned.** Every fixed height, and every
+  geometry-derived rule tried (spacing, measured surface bulge, room to the
+  next surface, crease-following resampling, and combinations), failed on at
+  least one fixture: too thin and the band misses a crease and leaves the seam
+  in pieces, too thick and it reaches through a fin and cuts that too. The
+  cutter therefore **verifies instead of tuning** — it works up a ladder of
+  heights and keeps the first one carried right through to closed parts. Every
+  fixture is cut within four rungs.
+- **Both halves must be capped from one shared triangulation.** Capping them
+  separately is the obvious thing and it is wrong: the rim is a loop in space,
+  and two triangulations of it span different surfaces, so the parts stop
+  mating and 2% of the model goes missing.
+- **Two gotchas worth keeping.** `mesh.intersect` only sees a selection set on
+  the mesh in object mode — assignments through `bmesh.from_edit_mesh` do not
+  reach it. And rims must be walked in coordinate order, not bmesh's, or the
+  same cut caps one run and not the next (the bug in §6 again, in a new place).
 
 ---
 
@@ -229,6 +257,28 @@ runs through open space). Two rules learned the hard way:
 
 `trial_cut` (bound to **T** in the editor) makes the cut on a copy and reports
 what happens. Keep it: it is the only honest answer to "will this work".
+
+## Still to do
+
+The cutter is in and honest; the old one is still lying around behind it.
+
+1. **The editor still previews the old lid.** `shape_edit._rebuild_cap` draws
+   `surface.cap_preview_tris`, which builds the synthesised lid — not what the
+   cutter does any more. It should show the cap the cutter actually makes: the
+   line's ring filled by `mesh_cut._ear_clip`.
+2. **Delete what nothing needs then:** `cap_sheet`, `build_cap_slab`,
+   `cap_preview_tris`, `find_join_hints`, `_rim_rings`, `_segments_touch`,
+   `CAP_STEP_OUT`, `SEAM_FACTOR`, and `JOIN_HINTS` if the last two readers of it
+   go. `failure_reason` still leans on `find_join_hints` and should instead say
+   plainly that the line could not be cut into the surface.
+3. **Drop `pp_undercut`** (props, UI, and the two README mentions). It only
+   existed to push a synthesised rim further out, and there is no rim to push.
+   The "no leftover settings" guard will catch it if the property is removed
+   without the panel.
+4. **A fixture for a line that genuinely cannot cut.** The fin used to be it and
+   now cuts cleanly, so the honest-failure path has no test. A loop drawn the
+   long way round a torus does not separate the surface at all, which is the
+   real remaining failure and would exercise the ladder running out.
 
 ## 8. What to delete once the new cutter works
 

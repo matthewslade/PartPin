@@ -2088,23 +2088,23 @@ def scenario_inspection_marks(core):
         pieces, _j, _h = surface.trial_cut(cut, model)
         check(f"and it does cut ({label})", pieces == 2, f"{pieces} pieces")
 
-    # A line that cannot be cut is marked, and says which problem it is.
+    # The awkward one. A fin crossing the line used to be marked in red as a
+    # surface folding onto itself, and the cut used to fail. It cuts now, so
+    # there must be nothing on it: marks on a working cut are the thing that
+    # makes the rest of them worthless.
     reset_scene()
     s = bpy.context.scene.part_pin
     model = make_limb_with_fin(core)
     s.target = model
     cut = collar_cut(core, surface, model)
     found = surface.inspect_cut(cut, model)
-    check("a cut that will not work is marked", any(found.values()),
-          ", ".join(f"{k}={len(v)}" for k, v in found.items()))
-    for kind, places in found.items():
-        if places:
-            check(f"{kind} has advice to give", kind in surface.TROUBLE,
-                  str(sorted(surface.TROUBLE)))
-            check(f"{kind} marks are on the model, not scattered",
-                  max(surface_gap_to(model, p) for p in places)
-                  < core.bbox_diagonal(model) * 0.2,
-                  f"furthest {max(surface_gap_to(model, p) for p in places):.3f}")
+    pieces, _j, _h = surface.trial_cut(cut, model)
+    check("a line running across a fin cuts", pieces == 2, f"{pieces} pieces")
+    check("and is marked with nothing at all", not any(found.values()),
+          ", ".join(f"{k}={len(v)}" for k, v in found.items() if v))
+    check("every mark there is has advice to give",
+          all(kind in surface.TROUBLE for kind in found),
+          str(sorted(surface.TROUBLE)))
 
     # A line dragged off the model is called out as such.
     reset_scene()

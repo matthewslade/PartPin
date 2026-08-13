@@ -18,16 +18,10 @@ LINE_COLOR_HIDDEN = (1.0, 0.62, 0.16, 0.22)
 POINT_COLOR = (0.96, 0.96, 0.96, 1.0)
 
 TROUBLE_COLORS = {
-    surface.FOLDED: (1.0, 0.15, 0.15, 1.0),   # red: the cut folds onto itself
-    surface.BURIED: (1.0, 0.60, 0.00, 1.0),   # amber: cannot break out here
     surface.ADRIFT: (1.0, 0.95, 0.30, 1.0),   # yellow: line off the model
-    surface.HOLLOW: (0.55, 0.40, 1.00, 1.0),  # violet: cut through open space
 }
 TROUBLE_LABELS = {
-    surface.FOLDED: "red = folds onto itself",
-    surface.BURIED: "amber = cannot break out",
     surface.ADRIFT: "yellow = off the model",
-    surface.HOLLOW: "violet = through open space",
 }
 CAP_COLOR = (1.0, 0.62, 0.16, 0.16)       # the lid that will do the cutting
 CAP_COLOR_EDGE = (1.0, 0.72, 0.30, 0.5)

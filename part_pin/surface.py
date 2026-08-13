@@ -921,85 +921,45 @@ def cap_sheet(cut, target, usable, ring=96, relax=18, cuts=2,
 JOIN_HINTS = {}
 
 
-# What an inspection can find wrong with a cut, and what to do about each.
-FOLDED = 'FOLDED'        # the cut surface doubles back on itself
-BURIED = 'BURIED'        # its edge is still inside the model
+# What an inspection can find wrong with a cut, and what to do about it.
+#
+# There used to be four of these. Three of them measured a lid that was
+# synthesised to span the line — whether it folded, whether its rim broke out
+# of the model, whether its middle ran through open space. No lid is built any
+# more: the cut is made along the model's own faces, so it cannot fold, its
+# rim is on the surface by construction, and what it spans is whatever the
+# line encloses. Those three could only ever fire on nothing, or worse, on a
+# cut that works — which is how they lost the user's trust. They are gone.
 ADRIFT = 'ADRIFT'        # the line has left the model's surface
-HOLLOW = 'HOLLOW'        # the cut passes outside the model well inside its line
 
 TROUBLE = {
-    FOLDED: ("the cut surface folds onto itself — spread these points apart, "
-             "or take the line a shorter way round"),
-    BURIED: ("the cut cannot break out of the model here — move the line to "
-             "where the piece is clear, or raise Undercut"),
     ADRIFT: "the line has come off the model here — drag these points back on",
-    HOLLOW: ("the cut runs through open space here — the line encloses more "
-             "than solid material, so bring it in closer"),
 }
 
 
-def inspect_cut(cut, target, ring=96):
+def inspect_cut(cut, target):
     """Everything measurably wrong with a cut, as places on the model.
 
-    Read-only: it builds the cut surface the cutter would use and measures it
-    against the model, so what it reports is what will happen rather than a
-    guess at it. Returns {kind: [world positions]}.
+    Read-only, and silent about a cut with nothing wrong with it. The one
+    thing that can still be wrong with a line is that it has come off the
+    model; whether the cut will separate is not guessed at here but answered
+    by `trial_cut`, which makes the cut and looks.
+
+    Returns {kind: [world positions]}.
     """
-    found = {FOLDED: [], BURIED: [], ADRIFT: [], HOLLOW: []}
-    usable, problem, _warning = loop_quality(cut, min_alignment=0.0)
+    found = {ADRIFT: []}
+    _usable, problem, _warning = loop_quality(cut, min_alignment=0.0)
     if problem is not None:
         return found
 
     matrix = cut.matrix_world
     diagonal = core.bbox_diagonal(target)
-
-    # The line itself: have the points come off the model? Measured on the
-    # points as stored, not on the drawn line, which is put onto the surface as
-    # it is built and so could never look adrift.
+    # Measured on the points as stored, not on the drawn line, which is put
+    # onto the surface as it is built and so could never look adrift.
     for point in cut.pp_points:
         world = matrix @ Vector(point.co)
         if surface_gap(target, world) > diagonal * 2e-3:
             found[ADRIFT].append(world)
-
-    buried = []
-    bm, problem = cap_sheet(cut, target, usable, ring=ring, stuck=buried)
-    if bm is None:
-        return found
-    found[BURIED] = list(buried)
-
-    # Each boundary is checked against itself, never against another.
-    rings = _rim_rings(bm)
-    if len(rings) > 1:
-        # A lid with more than one boundary has holes in it, which is worth
-        # saying: the cut cannot be trusted to separate anything.
-        for ring in rings[1:]:
-            found[FOLDED].extend(matrix @ vert.co for vert in ring[::4])
-    for ring in rings:
-        spacing = loop_length([v.co for v in ring]) / max(len(ring), 1)
-        pinch = spacing * 0.35
-        for i, vert in enumerate(ring):
-            a1, a2 = vert.co, ring[(i + 1) % len(ring)].co
-            for j in range(i + 2, len(ring)):
-                if i == 0 and j == len(ring) - 1:
-                    continue  # the ring's two ends are neighbours
-                b1, b2 = ring[j].co, ring[(j + 1) % len(ring)].co
-                if _segments_touch(a1, a2, b1, b2, pinch):
-                    found[FOLDED].append(matrix @ ((a1 + a2) * 0.5))
-                    found[FOLDED].append(matrix @ ((b1 + b2) * 0.5))
-
-    # The middle of the lid: is it running through open space?
-    edge_verts = {v for v in bm.verts if v.is_boundary}
-    for _step in range(2):
-        edge_verts |= {edge.other_vert(v) for v in set(edge_verts)
-                       for edge in v.link_edges}
-    for face in bm.faces:
-        if any(vert in edge_verts for vert in face.verts):
-            continue
-        centre = matrix @ face.calc_center_median()
-        if not core.point_inside(target, centre):
-            found[HOLLOW].append(centre)
-    bm.free()
-
     return {kind: _thin(places) for kind, places in found.items()}
 
 
