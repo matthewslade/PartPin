@@ -1676,6 +1676,67 @@ def scenario_draw_operator_registered(core):
           .keywords.get('default') is True)
 
 
+def scenario_line_hugs_surface(core):
+    """The drawn line must lie on the model wherever it runs, and be lifted
+    clear of it by a controllable amount so the surface does not swallow it."""
+    print("Scenario: the cut line hugs the surface and is lifted clear")
+    reset_scene()
+    from part_pin import shape_edit, surface
+    import types
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    cut = collar_cut(core, surface, model)
+
+    # Pull a point well away, so the cut's own surface wanders off the model
+    # between the points — where the line used to leave the surface.
+    point = cut.pp_points[0]
+    world = cut.matrix_world @ Vector(point.co)
+    point.co = cut.matrix_world.inverted() @ surface.project_to_surface(
+        model, world + Vector((-0.5, 0.0, 0.0)))
+    surface.refit_frame(cut)
+
+    cls = shape_edit.PARTPIN_OT_edit_cut_surface
+    op = types.SimpleNamespace()
+    setattr(op, '_rebuild_cache', cls._rebuild_cache.__get__(op))
+    op.cut, op.target = cut, model
+    op.hover, op.dragging, op.moved, op._cache = -1, -1, False, None
+    op.report = lambda *a, **k: None
+
+    diagonal = core.bbox_diagonal(model)
+    s.line_lift = 0.0
+    op._rebuild_cache()
+    samples = [p for line in op._cache['polylines'] for p in line]
+    check("the line is drawn in detail", len(samples) > 60,
+          f"{len(samples)} samples")
+    worst = max(surface_distance(model, p) for p in samples)
+    check("every sample sits on the surface", worst < diagonal * 1e-4,
+          f"furthest {worst:.6f} of {diagonal:.2f}")
+
+    s.line_lift = 0.004
+    op._rebuild_cache()
+    lifted = [p for line in op._cache['polylines'] for p in line]
+    offsets = [surface_distance(model, p) for p in lifted]
+    expected = diagonal * 0.004
+    check("the lift raises the whole line evenly",
+          abs(min(offsets) - expected) < expected * 0.1
+          and abs(max(offsets) - expected) < expected * 0.1,
+          f"{min(offsets):.4f}..{max(offsets):.4f}, expected {expected:.4f}")
+
+    check("the cut itself does not move with the lift",
+          max(surface_distance(model, cut.matrix_world @ Vector(p.co))
+              for p in cut.pp_points) < diagonal * 1e-4,
+          "control points left the surface")
+
+    # The cut still works, and lands where the line is — not where it is drawn.
+    s.line_lift = 0.0015
+    failures = []
+    parts, _applied, _warns = core.create_parts(
+        bpy.context, model, [cut], keep_original=True, failures=failures)
+    check("the lifted display does not affect the cut", len(parts) == 2,
+          f"got {len(parts)}: {failures}")
+
+
 def scenario_cap_preview(core):
     """The surface spanning the line is shown as it is edited, and it is the
     same surface that does the cutting."""
@@ -1880,6 +1941,7 @@ def main():
     scenario_draw_then_adjust(core)
     scenario_draw_cut_rejections(core)
     scenario_draw_operator_registered(core)
+    scenario_line_hugs_surface(core)
     scenario_cap_preview(core)
     scenario_cut_object_shows_the_lid(core)
     scenario_modal_helpers(core)

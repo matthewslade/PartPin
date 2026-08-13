@@ -74,6 +74,12 @@ Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
    Middle-mouse and the scroll wheel still orbit and zoom, so you can
    spin the model around while editing.
 
+   The line is drawn on the model's surface wherever it runs, and lifted a
+   hair clear of it so the surface cannot swallow it. *Line Lift* sets how
+   far — raise it if the line still disappears into the model on your
+   sculpt, lower it if it looks detached. It moves what is drawn only; the
+   cut itself stays on the surface.
+
    Because a plane is defined by only three points, dragging points
    turns the cut into a **free-form cut surface**: a smooth surface that
    passes exactly through every point you place. It is stored as a

@@ -100,6 +100,9 @@ class PARTPIN_OT_draw_cut_line(bpy.types.Operator):
             return {'CANCELLED'}
 
         self.strokes = [[]]       # world points, one list per drawn stretch
+        self.drawn = [[]]         # the same, lifted clear of the surface
+        self.lift = (core.bbox_diagonal(self.target)
+                     * core.get_settings(context).line_lift)
         self.drawing = False
         self.near_start = False
         self.min_step = core.bbox_diagonal(self.target) * MIN_STEP
@@ -155,7 +158,22 @@ class PARTPIN_OT_draw_cut_line(bpy.types.Operator):
         if stroke and (world - stroke[-1]).length < self.min_step:
             return False
         stroke.append(world)
+        # Kept apart: the cut is made from the hits themselves, while what is
+        # drawn sits a little above the surface, or the surface swallows it.
+        self.drawn[-1].append(self._lifted(world))
         return True
+
+    def _lifted(self, world):
+        model = surface.evaluated(self.target)
+        ok, near, normal, _index = model.closest_point_on_mesh(
+            model.matrix_world.inverted() @ world)
+        if not ok:
+            return world
+        surfaced = model.matrix_world @ near
+        outward = model.matrix_world.to_3x3() @ normal
+        if self.lift > 0.0 and outward.length > 1e-9:
+            surfaced = surfaced + outward.normalized() * self.lift
+        return surfaced
 
     def _close_ready(self, mouse):
         """True when the pointer is back at the start and there is enough
@@ -199,21 +217,26 @@ class PARTPIN_OT_draw_cut_line(bpy.types.Operator):
                 self.drawing = True
                 if self.strokes[-1]:
                     self.strokes.append([])
+                    self.drawn.append([])
                 self._add(mouse)
                 return {'RUNNING_MODAL'}
             if event.value == 'RELEASE':
                 self.drawing = False
                 if not self.strokes[-1]:
                     self.strokes.pop()
+                    self.drawn.pop()
                     if not self.strokes:
                         self.strokes = [[]]
+                        self.drawn = [[]]
                 return {'RUNNING_MODAL'}
 
         if event.type in {'BACK_SPACE', 'DEL'} and event.value == 'PRESS':
             if len(self.strokes) > 1:
                 self.strokes.pop()
+                self.drawn.pop()
             else:
                 self.strokes = [[]]
+                self.drawn = [[]]
             self.report({'INFO'}, "Stroke removed")
             return {'RUNNING_MODAL'}
 
@@ -261,7 +284,7 @@ class PARTPIN_OT_draw_cut_line(bpy.types.Operator):
 
     def _draw(self, context):
         try:
-            for stroke in self.strokes:
+            for stroke in self.drawn:
                 if len(stroke) < 2:
                     continue
                 _draw_polyline(stroke, STROKE_COLOR_HIDDEN, 2.0, 'NONE')
@@ -269,11 +292,11 @@ class PARTPIN_OT_draw_cut_line(bpy.types.Operator):
 
             # Dashes across the gaps, so a perimeter drawn in stretches
             # still reads as one line.
-            filled = [s for s in self.strokes if s]
+            filled = [s for s in self.drawn if s]
             for before, after in zip(filled, filled[1:]):
                 _draw_polyline([before[-1], after[0]], GAP_COLOR, 1.5, 'NONE')
 
-            points = self._points()
+            points = [p for stroke in self.drawn for p in stroke]
             if points:
                 colour = START_COLOR_READY if self.near_start else START_COLOR
                 _draw_dots([points[0]], colour,

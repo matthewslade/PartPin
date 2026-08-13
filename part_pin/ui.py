@@ -103,6 +103,7 @@ class PARTPIN_PT_shape(PARTPIN_PT_base, bpy.types.Panel):
         col.scale_y = 1.4
         col.operator("partpin.edit_cut_surface", icon='MOD_MESHDEFORM')
         layout.prop(s, "handle_points")
+        layout.prop(s, "line_lift")
 
         if cut is not None and cut.pp_cut_kind == 'SURFACE':
             loops = len({p.loop for p in cut.pp_points})

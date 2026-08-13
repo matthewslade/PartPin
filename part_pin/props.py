@@ -146,6 +146,19 @@ class PartPinSettings(bpy.types.PropertyGroup):
         min=8,
         max=160,
     )
+    line_lift: FloatProperty(
+        name="Line Lift",
+        description=(
+            "How far above the model's surface the cut line and its points "
+            "are drawn, as a fraction of the model's size. Enough to keep the "
+            "line clear of the surface it lies on, which would otherwise hide "
+            "parts of it. Drawing only — the cut itself does not move"
+        ),
+        default=0.0015,
+        min=0.0,
+        max=0.02,
+        precision=4,
+    )
     auto_snap_connectors: BoolProperty(
         name="Snap Connectors",
         description=(

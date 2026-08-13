@@ -254,23 +254,36 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
             self._cap_tris = []
 
     def _rebuild_cache(self):
-        """Recompute the drawable cut line and the world control points."""
+        """Recompute the drawable cut line and the world control points.
+
+        Every sample is put onto the model's surface, not just those that
+        happened to be near it: between the points, the cut's own surface
+        wanders off the model, and leaving the line there is what makes it
+        look like it almost — but not quite — reaches the surface. It is then
+        lifted clear along the surface normal, since a line drawn exactly on a
+        surface is half-swallowed by it.
+        """
         cut = self.cut
         field = surface.field_for(cut)
         matrix = cut.matrix_world
         model = surface.evaluated(self.target)
         inv_target = model.matrix_world.inverted()
+        normal_matrix = model.matrix_world.to_3x3()
+        lift = (core.bbox_diagonal(self.target)
+                * core.get_settings(bpy.context).line_lift)
+
+        def on_model(point):
+            ok, near, normal, _index = model.closest_point_on_mesh(
+                inv_target @ point)
+            if not ok:
+                return point
+            surfaced = model.matrix_world @ near
+            outward = normal_matrix @ normal
+            if lift > 0.0 and outward.length > 1e-9:
+                surfaced = surfaced + outward.normalized() * lift
+            return surfaced
 
         loops = surface.control_loops(cut)
-        spacing = 0.0
-        counted = 0
-        for loop in loops:
-            for i, p in enumerate(loop):
-                spacing += (loop[(i + 1) % len(loop)] - p).length
-                counted += 1
-        spacing = spacing / counted if counted else 1.0
-        limit = spacing * 0.35
-
         polylines = []
         for loop in loops:
             line = []
@@ -280,16 +293,8 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
                     t = k / SEGMENT_SUBDIV
                     u = a.x + (b.x - a.x) * t
                     v = a.y + (b.y - a.y) * t
-                    on_cut = matrix @ Vector((u, v, field.eval(u, v)))
-                    # Hug the model: snap onto its surface when that is a
-                    # small correction, otherwise keep the surface point.
-                    ok, near, _n, _i = model.closest_point_on_mesh(
-                        inv_target @ on_cut)
-                    if ok:
-                        near_world = model.matrix_world @ near
-                        if (near_world - on_cut).length <= limit:
-                            on_cut = near_world
-                    line.append(on_cut)
+                    line.append(on_model(
+                        matrix @ Vector((u, v, field.eval(u, v)))))
             if line:
                 line.append(line[0])
             polylines.append(line)
@@ -298,6 +303,7 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
             'field': field,
             'polylines': polylines,
             'world': [matrix @ Vector(p.co) for p in cut.pp_points],
+            'drawn': [on_model(matrix @ Vector(p.co)) for p in cut.pp_points],
         }
 
     def _surface_hit(self, context, mouse):
@@ -556,7 +562,7 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
                              15.0)
                 _draw_points(points, colour, 9.0)
 
-            world = self._cache['world']
+            world = self._cache.get('drawn') or self._cache['world']
             plain = [w for i, w in enumerate(world)
                      if i != self.hover and i != self.dragging]
             _draw_points(plain, POINT_COLOR, 9.0)
