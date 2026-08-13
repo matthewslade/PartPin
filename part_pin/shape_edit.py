@@ -23,13 +23,15 @@ PROBE_COLORS = {
     surface.PROBE_MARGIN: (1.0, 0.78, 0.0, 1.0),   # amber: needs more reach
     surface.PROBE_STUCK: (0.65, 0.35, 1.0, 1.0),   # violet: line off material
 }
+CAP_COLOR = (1.0, 0.62, 0.16, 0.16)       # the lid that will do the cutting
+CAP_COLOR_EDGE = (1.0, 0.72, 0.30, 0.5)
 POINT_HOVER = (1.0, 0.95, 0.35, 1.0)
 POINT_ACTIVE = (0.35, 1.0, 0.45, 1.0)
 
 HIT_RADIUS_PX = 14
 SEGMENT_SUBDIV = 8
 
-STATUS = ("Drag points on the model to reshape the cut    "
+STATUS = ("Drag points — the shaded surface is the cut    "
           "Ctrl+Click: add point    X: remove point    "
           "Alt+X: remove whole line    Ctrl+Wheel: falloff    "
           "Enter: confirm    Esc: cancel")
@@ -45,6 +47,19 @@ def _draw_lines(points, color, width, depth_test):
     shader.uniform_float("lineWidth", width)
     shader.uniform_float("color", color)
     batch_for_shader(shader, 'LINE_STRIP', {"pos": points}).draw(shader)
+
+
+def _draw_tris(tris, color):
+    if len(tris) < 3:
+        return
+    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    # Seen through the model: the cut surface is inside it, and the point of
+    # showing it is to see where it lands.
+    gpu.state.depth_test_set('NONE')
+    gpu.state.blend_set('ALPHA')
+    gpu.state.face_culling_set('NONE')
+    shader.uniform_float("color", color)
+    batch_for_shader(shader, 'TRIS', {"pos": tris}).draw(shader)
 
 
 def _draw_points(points, color, size):
@@ -124,9 +139,11 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         self.dragging = -1
         self.moved = False
         self._cache = None
+        self._cap_tris = []
         self._probe_points = {}
         self.probe_summary = ""
         self._rebuild_cache()
+        self._rebuild_cap()
 
         self._handle = bpy.types.SpaceView3D.draw_handler_add(
             self._draw, (context,), 'WINDOW', 'POST_VIEW')
@@ -195,6 +212,17 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
     # ------------------------------------------------------------------
     # Geometry helpers
     # ------------------------------------------------------------------
+
+    def _rebuild_cap(self):
+        """The lid spanning the line, as it will be cut — rebuilt whenever the
+        line moves, so it is always the surface the cut would use."""
+        self._cap_tris = []
+        if not self.cut.pp_local:
+            return
+        try:
+            self._cap_tris = surface.cap_preview_tris(self.cut, self.target)
+        except Exception:
+            self._cap_tris = []
 
     def _rebuild_cache(self):
         """Recompute the drawable cut line and the world control points."""
@@ -309,6 +337,7 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         self.cut.pp_main_loop = items[after][1]
         self.moved = True
         self._rebuild_cache()
+        self._rebuild_cap()
 
     def _delete_point(self, index):
         items = [(Vector(p.co), p.loop) for p in self.cut.pp_points]
@@ -323,6 +352,7 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         self.hover = -1
         self.moved = True
         self._rebuild_cache()
+        self._rebuild_cap()
 
     def _delete_loop(self, index):
         """Drop a whole cut line — the region it fences stops being cut."""
@@ -344,6 +374,7 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         self.hover = -1
         self.moved = True
         self._rebuild_cache()
+        self._rebuild_cap()
         self.report({'INFO'}, "Cut line removed — that region stays whole")
 
     # ------------------------------------------------------------------
@@ -370,6 +401,7 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
                                                self.cut.pp_falloff * step))
             self.moved = True
             self._rebuild_cache()
+            self._rebuild_cap()
             context.workspace.status_text_set(
                 f"Falloff {self.cut.pp_falloff:.2f}    " + STATUS)
             return {'RUNNING_MODAL'}
@@ -385,6 +417,7 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
                         self.cut.matrix_world.inverted() @ world)
                     self.moved = True
                     self._rebuild_cache()
+                    self._rebuild_cap()
             else:
                 self.hover = self._nearest_point(mouse)
             return {'RUNNING_MODAL'}
@@ -408,6 +441,7 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
                         self.cut.pp_points[self.dragging].loop
                     surface.refit_frame(self.cut)
                     self._rebuild_cache()
+                    self._rebuild_cap()
                     self._update_status(context)
                 self.dragging = -1
                 return {'RUNNING_MODAL'}
@@ -475,6 +509,8 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         if self._cache is None:
             return
         try:
+            _draw_tris(self._cap_tris, CAP_COLOR)
+
             for line in self._cache['polylines']:
                 _draw_lines(line, LINE_COLOR_HIDDEN, 2.0, 'NONE')
                 _draw_lines(line, LINE_COLOR, 3.0, 'LESS_EQUAL')
@@ -501,6 +537,7 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         finally:
             gpu.state.depth_test_set('LESS_EQUAL')
             gpu.state.blend_set('NONE')
+            gpu.state.face_culling_set('BACK')
             gpu.state.point_size_set(1.0)
 
 

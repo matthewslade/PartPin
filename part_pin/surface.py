@@ -606,14 +606,13 @@ def build_display_mesh(cut, target, resolution=DISPLAY_RES):
     A localized cut previews only the patch inside its cut line, so the
     viewport shows what will actually be cut.
     """
-    patch = None
+    bm = None
     if is_local(cut):
-        usable, _problem, _warning = loop_quality(cut)
-        if usable:
-            patch = patch_grid(cut, target, resolution, indices=usable)
-    if patch is not None:
-        bm = _patch_bm(patch, thickness=0.0)
-    else:
+        usable, problem, _warning = loop_quality(cut, min_alignment=0.0)
+        if problem is None and usable:
+            bm, _issue = cap_sheet(cut, target, usable, ring=56, relax=10,
+                                   cuts=1, settle_rim=False)
+    if bm is None:
         bm = _full_grid_bm(cut, target, resolution)
 
     mesh = bpy.data.meshes.new("PartPin_CutSurface")
@@ -1290,28 +1289,21 @@ def probe_summary(probes, cut):
     return bad, suggested, summary
 
 
-def build_cap_slab(cut, target, scene=None, ring=96, relax=18):
-    """Build the cut surface straight from the perimeter and nothing else.
+def cap_sheet(cut, target, usable, ring=96, relax=18, cuts=2,
+              settle_rim=True):
+    """The lid that spans a cut's line, in the cut's own space.
 
-    The perimeter is a closed line on the model's surface. Spanning it with a
-    cap — a lid drawn inwards from the line — gives a surface whose boundary
-    *is* the line, so thickening that cap into a thin slab and subtracting it
-    severs exactly what the line encircles. No grid decides which side of the
-    line counts, and nothing reaches sideways to break through the surface.
+    Laid out inside the line, evened out, then lifted onto the cut's smooth
+    surface — a height over a plane, so it can never fold back on itself. A
+    plain fan of triangles in space can fold on a line with a spur in it, and
+    a folded lid cuts nothing.
 
-    The lid is laid out inside the line and then lifted onto the cut's own
-    smooth surface, which is a height over its plane and so can never fold
-    back on itself — a plain fan of triangles to the middle can, on a line
-    with a spur in it, and a folded lid cuts nothing cleanly.
+    With `settle_rim`, the rim is put on the model's surface and stepped out
+    until clear of it, which is what a cutting lid needs; without, the lid is
+    left exactly on the line, which is what a preview should show.
 
-    Returns (object, problem, warning).
+    Returns (bmesh, problem).
     """
-    scene = scene or bpy.context.scene
-    refit_frame(cut)
-    usable, problem, warning = loop_quality(cut, min_alignment=0.0)
-    if problem is not None:
-        return None, problem, warning
-
     loops = control_loops(cut)
     field = field_for(cut, usable)
     matrix = cut.matrix_world
@@ -1335,7 +1327,6 @@ def build_cap_slab(cut, target, scene=None, ring=96, relax=18):
         flat = [(p.x, p.y) for p in dense]
         centre = (sum(u for u, _v in flat) / len(flat),
                   sum(v for _u, v in flat) / len(flat))
-
         verts = [bm.verts.new((u, v, 0.0)) for u, v in flat]
         hub = bm.verts.new((centre[0], centre[1], 0.0))
         for i, vert in enumerate(verts):
@@ -1348,20 +1339,21 @@ def build_cap_slab(cut, target, scene=None, ring=96, relax=18):
     if not bm.faces:
         bm.free()
         return None, ("the cut line does not describe a loop to span — "
-                      "redraw it"), warning
+                      "redraw it")
 
-    bmesh.ops.subdivide_edges(bm, edges=list(bm.edges), cuts=2,
-                              use_grid_fill=True)
+    if cuts > 0:
+        bmesh.ops.subdivide_edges(bm, edges=list(bm.edges), cuts=cuts,
+                                  use_grid_fill=True)
     # Subdividing rebuilds the mesh, so the line is found again afterwards:
     # the lid is an open sheet, and its only boundary is the line itself.
-    fixed = {v for v in bm.verts if v.is_boundary}
+    rim = {v for v in bm.verts if v.is_boundary}
 
     # Even the lid out inside the line. Flat, so it cannot tangle: only where
     # each point sits within the line moves, never the line itself.
     for _pass in range(max(int(relax), 0)):
         moved = {}
         for vert in bm.verts:
-            if vert in fixed:
+            if vert in rim:
                 continue
             neighbours = [edge.other_vert(vert) for edge in vert.link_edges]
             if neighbours:
@@ -1375,57 +1367,97 @@ def build_cap_slab(cut, target, scene=None, ring=96, relax=18):
     if area < 0.02 * perimeter * perimeter / (4.0 * 3.141592653589793):
         bm.free()
         return None, ("this cut line does not enclose an area to cut off. "
-                      "Draw it right round the part you want removed"), warning
+                      "Draw it right round the part you want removed")
 
-    # Lift the lid onto the cut's surface, and step its rim out through the
-    # model so the slab starts outside and the piece comes free.
     for vert in bm.verts:
         u, v = vert.co.x, vert.co.y
         vert.co = Vector((u, v, field.eval(u, v)))
-    # Work out where each point of the rim should sit, then even those
-    # positions out along the rim before applying them. In a crease,
-    # neighbouring points can find opposite faces of it and be sent opposite
-    # ways, which folds the lid over itself — and a folded lid cuts nothing.
-    targets = {}
-    for vert in fixed:
-        world = matrix @ vert.co
-        ok, location, normal, _index = model.closest_point_on_mesh(
-            to_model @ world)
-        if not ok or normal.length < 1e-9:
-            continue
-        # Put the rim on the surface first: between the points the user placed,
-        # the cut's own surface wanders a little off the model, and stepping
-        # out from there can leave the rim buried.
-        on_surface = model.matrix_world @ location
-        outward = (normal_matrix @ normal).normalized()
-        travelled = step_out
-        while travelled <= limit_out:
-            if not core.point_inside(target, on_surface + outward * travelled):
-                break
-            travelled += step_out
-        targets[vert] = matrix.inverted() @ (on_surface + outward * travelled)
 
-    for _pass in range(4):
-        smoothed = {}
+    if settle_rim:
+        # Work out where each point of the rim should sit, then even those
+        # positions out along the rim before applying them. In a crease,
+        # neighbouring points can find opposite faces of it and be sent
+        # opposite ways, which folds the lid over itself.
+        targets = {}
+        for vert in rim:
+            world = matrix @ vert.co
+            ok, location, normal, _index = model.closest_point_on_mesh(
+                to_model @ world)
+            if not ok or normal.length < 1e-9:
+                continue
+            # Put the rim on the surface first: between the points the user
+            # placed, the cut's own surface wanders a little off the model, and
+            # stepping out from there can leave the rim buried.
+            on_surface = model.matrix_world @ location
+            outward = (normal_matrix @ normal).normalized()
+            travelled = step_out
+            while travelled <= limit_out:
+                if not core.point_inside(target,
+                                         on_surface + outward * travelled):
+                    break
+                travelled += step_out
+            targets[vert] = matrix.inverted() @ (on_surface
+                                                 + outward * travelled)
+        for _pass in range(4):
+            smoothed = {}
+            for vert, position in targets.items():
+                neighbours = [edge.other_vert(vert) for edge in vert.link_edges
+                              if edge.is_boundary]
+                nearby = [targets[n] for n in neighbours if n in targets]
+                if nearby:
+                    average = sum(nearby, Vector()) / len(nearby)
+                    smoothed[vert] = position.lerp(average, 0.5)
+            targets.update(smoothed)
         for vert, position in targets.items():
-            neighbours = [edge.other_vert(vert) for edge in vert.link_edges
-                          if edge.is_boundary]
-            nearby = [targets[n] for n in neighbours if n in targets]
-            if nearby:
-                average = sum(nearby, Vector()) / len(nearby)
-                smoothed[vert] = position.lerp(average, 0.5)
-        targets.update(smoothed)
-
-    for vert, position in targets.items():
-        vert.co = position
+            vert.co = position
 
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    return bm, None
+
+
+def cap_preview_tris(cut, target, ring=56, relax=10, cuts=1):
+    """World-space triangles of the lid, for showing what the cut will be."""
+    usable, problem, _warning = loop_quality(cut, min_alignment=0.0)
+    if problem is not None:
+        return []
+    bm, problem = cap_sheet(cut, target, usable, ring=ring, relax=relax,
+                            cuts=cuts, settle_rim=False)
+    if bm is None:
+        return []
+    matrix = cut.matrix_world
+    tris = []
+    for face in bm.faces:
+        corners = [matrix @ v.co for v in face.verts]
+        for i in range(1, len(corners) - 1):
+            tris.extend((corners[0], corners[i], corners[i + 1]))
+    bm.free()
+    return tris
+
+
+def build_cap_slab(cut, target, scene=None, ring=96, relax=18):
+    """The cutter: the lid that spans the cut's line, thickened to a hair.
+
+    Subtracting it severs exactly what the line encircles. The perimeter
+    decides everything — no grid picks a side of the line, and nothing reaches
+    sideways into the model to break out through its surface.
+
+    Returns (object, problem, warning).
+    """
+    scene = scene or bpy.context.scene
+    refit_frame(cut)
+    usable, problem, warning = loop_quality(cut, min_alignment=0.0)
+    if problem is not None:
+        return None, problem, warning
+
+    bm, problem = cap_sheet(cut, target, usable, ring=ring, relax=relax)
+    if bm is None:
+        return None, problem, warning
+
     thickness = max(core.bbox_diagonal(target) * SEAM_FACTOR, 1e-9)
     bmesh.ops.solidify(bm, geom=list(bm.faces), thickness=thickness)
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
-
     obj = core.new_mesh_object("PartPin_Cap", bm, scene.collection,
-                               matrix=matrix.copy())
+                               matrix=cut.matrix_world.copy())
     obj.hide_render = True
     return obj, None, warning
 

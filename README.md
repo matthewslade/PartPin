@@ -62,7 +62,7 @@ Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
 
    | Action | Result |
    | --- | --- |
-   | Drag a point | It slides along the model's surface; the cut reshapes to pass through it |
+   | Drag a point | It slides along the model's surface; the shaded surface spanning the line follows it |
    | Ctrl+Click | Add a point on the surface |
    | X | Remove the point under the cursor |
    | Alt+X | Remove a whole cut line (that region stops being cut) |
@@ -95,6 +95,10 @@ Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
    plane at right angles to where the cut started. The cut's plane
    re-fits itself to the line you are editing, so the region it fences
    is always one it can actually cut.
+
+   The shaded surface spanning your line **is the cut** — the same lid that
+   does the cutting, drawn through the model so you can see where it lands,
+   and rebuilt as you drag. What you see is what comes away.
 
    **How the cut is made: from the perimeter, inwards.** Your line is
    spanned by a lid — a surface drawn inwards from the line to its middle,

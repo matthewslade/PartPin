@@ -922,10 +922,11 @@ def scenario_delete_loop(core):
 
     cls = shape_edit.PARTPIN_OT_edit_cut_surface
     op = types.SimpleNamespace()
-    for name in ('_rebuild_cache', '_delete_loop'):
+    for name in ('_rebuild_cache', '_rebuild_cap', '_delete_loop'):
         setattr(op, name, getattr(cls, name).__get__(op))
     op.cut, op.target = cut, model
     op.hover, op.dragging, op.moved, op._cache = -1, -1, False, None
+    op._cap_tris = []
     op.report = lambda *a, **k: None
     op._rebuild_cache()
 
@@ -1582,10 +1583,11 @@ def scenario_draw_then_adjust(core):
 
     cls = shape_edit.PARTPIN_OT_edit_cut_surface
     op = types.SimpleNamespace()
-    for name in ('_rebuild_cache',):
+    for name in ('_rebuild_cache', '_rebuild_cap'):
         setattr(op, name, getattr(cls, name).__get__(op))
     op.cut, op.target = cut, model
     op.hover, op.dragging, op.moved, op._cache = -1, -1, False, None
+    op._cap_tris = []
     op.report = lambda *a, **k: None
     op._rebuild_cache()
     check("the drawn line draws as one loop",
@@ -1662,6 +1664,91 @@ def scenario_draw_operator_registered(core):
           .keywords.get('default') is True)
 
 
+def scenario_cap_preview(core):
+    """The surface spanning the line is shown as it is edited, and it is the
+    same surface that does the cutting."""
+    print("Scenario: live preview of the cut surface")
+    reset_scene()
+    from part_pin import surface
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    cut = collar_cut(core, surface, model)
+
+    tris = surface.cap_preview_tris(cut, model)
+    check("a surface is produced", len(tris) >= 3 * 8,
+          f"{len(tris) // 3} triangles")
+    check("its corners come in threes", len(tris) % 3 == 0)
+
+    def bounds(points):
+        return ([min(p[i] for p in points) for i in range(3)],
+                [max(p[i] for p in points) for i in range(3)])
+
+    line = [cut.matrix_world @ Vector(p.co) for p in cut.pp_points]
+    cap_lo, cap_hi = bounds(tris)
+    line_lo, line_hi = bounds(line)
+    span = max(line_hi[i] - line_lo[i] for i in range(3))
+    check("it spans the line and no further",
+          all(abs(cap_lo[i] - line_lo[i]) < span * 0.08
+              and abs(cap_hi[i] - line_hi[i]) < span * 0.08 for i in range(3)),
+          f"cap {[round(x, 2) for x in cap_lo]}..{[round(x, 2) for x in cap_hi]}"
+          f" vs line {[round(x, 2) for x in line_lo]}.."
+          f"{[round(x, 2) for x in line_hi]}")
+
+    # It follows the line: move a point and the surface moves with it.
+    point = cut.pp_points[0]
+    world = cut.matrix_world @ Vector(point.co)
+    moved = surface.project_to_surface(model, world + Vector((-0.4, 0, 0)))
+    point.co = cut.matrix_world.inverted() @ moved
+    after = surface.cap_preview_tris(cut, model)
+    check("the surface follows the point",
+          bounds(after)[0][0] < cap_lo[0] - 0.1,
+          f"reached x {bounds(after)[0][0]:.2f}, was {cap_lo[0]:.2f}")
+
+    # And it is the surface that cuts: the cutter is built from the same lid.
+    cap, problem, _warning = surface.build_cap_slab(cut, model)
+    check("the cutter is built from it", cap is not None, str(problem))
+    if cap is None:
+        return
+    cutter_lo, cutter_hi = core.world_bbox(cap)
+    preview_lo, preview_hi = bounds(after)
+    # The cutter is the same lid with its rim stepped out through the surface,
+    # so it reaches a little further than the preview — never less.
+    check("cutter and preview agree",
+          all(cutter_lo[i] <= preview_lo[i] + span * 0.02
+              and cutter_hi[i] >= preview_hi[i] - span * 0.02
+              and abs(cutter_lo[i] - preview_lo[i]) < span * 0.25
+              and abs(cutter_hi[i] - preview_hi[i]) < span * 0.25
+              for i in range(3)),
+          f"cutter {[round(x, 2) for x in cutter_lo]}.."
+          f"{[round(x, 2) for x in cutter_hi]} vs preview "
+          f"{[round(x, 2) for x in preview_lo]}.."
+          f"{[round(x, 2) for x in preview_hi]}")
+    core.remove_object(cap)
+
+
+def scenario_cut_object_shows_the_lid(core):
+    print("Scenario: the cut object itself shows the spanning surface")
+    reset_scene()
+    from part_pin import surface
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    cut = collar_cut(core, surface, model)
+    surface.build_display_mesh(cut, model)
+    bpy.context.view_layer.update()
+
+    check("the cut object has a surface", len(cut.data.polygons) > 8,
+          f"{len(cut.data.polygons)} faces")
+    lo, hi = core.world_bbox(cut)
+    line = [cut.matrix_world @ Vector(p.co) for p in cut.pp_points]
+    line_span = max(max(p[i] for p in line) - min(p[i] for p in line)
+                    for i in range(3))
+    check("it hugs the line rather than spanning the model",
+          max(hi - lo) < line_span * 1.3,
+          f"{max(hi - lo):.2f} vs line span {line_span:.2f}")
+
+
 def scenario_modal_helpers(core):
     """Drive the modal operator's logic directly (everything but the GPU)."""
     print("Scenario: surface-edit modal helpers")
@@ -1681,7 +1768,8 @@ def scenario_modal_helpers(core):
     import types
     cls = shape_edit.PARTPIN_OT_edit_cut_surface
     op = types.SimpleNamespace()
-    for name in ('_rebuild_cache', '_insert_point', '_delete_point',
+    for name in ('_rebuild_cache', '_rebuild_cap', '_insert_point',
+                 '_delete_point',
                  '_nearest_point', '_surface_hit'):
         setattr(op, name, getattr(cls, name).__get__(op))
     op.cut, op.target = cut, model
@@ -1780,6 +1868,8 @@ def main():
     scenario_draw_then_adjust(core)
     scenario_draw_cut_rejections(core)
     scenario_draw_operator_registered(core)
+    scenario_cap_preview(core)
+    scenario_cut_object_shows_the_lid(core)
     scenario_modal_helpers(core)
     scenario_operators_registered(core)
     scenario_export(core)  # runs easy mode internally, then exports
