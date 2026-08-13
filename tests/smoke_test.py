@@ -871,29 +871,37 @@ def scenario_local_seam(core):
 
 
 def scenario_local_display(core):
+    """The preview should cover the fenced region only — checked on a small
+    region of a long model, where the difference is unmistakable."""
     print("Scenario: preview mesh shows only the localized patch")
     reset_scene()
     s = bpy.context.scene.part_pin
-    model = make_sphere()
+    model = make_limb(core)
     s.target = model
     from part_pin import surface
 
     bpy.ops.partpin.add_plane_cut()
     cut = bpy.context.view_layer.objects.active
     cut, _error = surface.convert_to_surface(bpy.context, cut, model,
-                                             per_loop=16)
+                                            per_loop=16)
+    surface.store_control_points(cut, collar_points(surface, model, cut),
+                                [0] * 16)
+    cut.pp_main_loop = 0
+    surface.refit_frame(cut)
+    surface.build_display_mesh(cut, model)
     bpy.context.view_layer.update()  # refresh the cached bounding box
     lo, hi = core.world_bbox(cut)
-    check("localized preview hugs the cut line, not the whole plane",
-          (hi.x - lo.x) < 3.0, f"preview width {hi.x - lo.x:.3f}")
+    local_size = max(hi - lo)
+    check("localized preview hugs the collar", local_size < 2.5,
+          f"preview spans {local_size:.3f}")
 
     cut.pp_local = False
     surface.build_display_mesh(cut, model)
     bpy.context.view_layer.update()
     lo2, hi2 = core.world_bbox(cut)
-    check("full-extent preview is wider than the model",
-          (hi2.x - lo2.x) > 2.0 and (hi2.x - lo2.x) >= (hi.x - lo.x),
-          f"{hi2.x - lo2.x:.3f} vs {hi.x - lo.x:.3f}")
+    full_size = max(hi2 - lo2)
+    check("full-extent preview spans the whole model",
+          full_size > local_size * 1.5, f"{full_size:.3f} vs {local_size:.3f}")
 
 
 def scenario_delete_loop(core):
@@ -1118,6 +1126,142 @@ def scenario_collar_plus_leftover_line(core):
         check(f"part closed: {p.name}", is_closed(core, p))
 
 
+def make_limb_with_fin(core, thickness=0.04):
+    """A limb with a thin fin crossing the cut — material that carries on
+    past a collar drawn round the limb."""
+    import bmesh as bm_mod
+    from mathutils import Matrix
+    obj = make_limb(core)
+    bm = bm_mod.new()
+    bm_mod.ops.create_cube(bm, size=1.0)
+    bm.transform(Matrix.LocRotScale(Vector((2.0, 0.0, 0.75)), None,
+                                    Vector((1.4, thickness, 0.8))))
+    mesh = bpy.data.meshes.new("fin")
+    bm.to_mesh(mesh)
+    bm.free()
+    fin = link(bpy.data.objects.new("fin", mesh))
+    mod = obj.modifiers.new("u", 'BOOLEAN')
+    mod.object, mod.operation, mod.solver = fin, 'UNION', 'EXACT'
+    dg = bpy.context.evaluated_depsgraph_get()
+    obj.data = bpy.data.meshes.new_from_object(obj.evaluated_get(dg))
+    obj.modifiers.clear()
+    bpy.data.objects.remove(fin)
+    bpy.context.view_layer.update()
+    return obj
+
+
+def collar_cut(core, surface_mod, model, per_loop=16, radius=0.75):
+    bpy.ops.partpin.add_plane_cut()
+    cut = bpy.context.view_layer.objects.active
+    cut, _error = surface_mod.convert_to_surface(bpy.context, cut, model,
+                                                per_loop=per_loop)
+    surface_mod.store_control_points(
+        cut, collar_points(surface_mod, model, cut, radius=radius),
+        [0] * per_loop)
+    cut.pp_main_loop = 0
+    surface_mod.refit_frame(cut)
+    return cut
+
+
+def scenario_probe_finds_trouble(core):
+    """The probe must agree with what the cut actually does: silent on a
+    clean line, and pointing at the spots on a line that cannot sever."""
+    print("Scenario: probing a cut line for trouble spots")
+    from part_pin import surface
+
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    cut = collar_cut(core, surface, model)
+    probes = surface.probe_cut_line(cut, model)
+    bad, suggested, summary = surface.probe_summary(probes, cut)
+    check("clean collar reports no trouble spots", not bad, summary)
+    check("clean collar suggests no change", suggested is None, str(suggested))
+    check("clean collar checked several points along the line",
+          len(probes) >= 16, f"{len(probes)} probes")
+
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_limb_with_fin(core)
+    s.target = model
+    cut = collar_cut(core, surface, model)
+    probes = surface.probe_cut_line(cut, model)
+    bad, suggested, summary = surface.probe_summary(probes, cut)
+    check("a fin crossing the cut is flagged", len(bad) >= 3,
+          f"{len(bad)} flagged: {summary}")
+    check("the flags say material carries on past the line",
+          any(p['status'] in (surface.PROBE_MARGIN, surface.PROBE_STUCK)
+              for p in bad), str({p['status'] for p in bad}))
+    check("a bigger reach is suggested",
+          suggested is not None and suggested > cut.pp_margin,
+          f"{suggested} vs {cut.pp_margin}")
+    check("every flag carries a position to draw",
+          all(len(p['position']) == 3 for p in bad))
+    # Flags must sit on the fin, which is the actual obstruction.
+    on_fin = [p for p in bad if p['position'].z > 0.3]
+    check("flags land on the fin, not scattered over the model",
+          len(on_fin) >= len(bad) * 0.5,
+          f"{len(on_fin)} of {len(bad)} above z=0.3")
+
+
+def scenario_auto_reach(core):
+    """A cut that needs more reach should just work, and say what it did."""
+    print("Scenario: the cut finds the reach it needs by itself")
+    reset_scene()
+    from part_pin import surface
+    s = bpy.context.scene.part_pin
+    model = make_limb_with_fin(core)
+    s.target = model
+    cut = collar_cut(core, surface, model)
+    started_at = cut.pp_margin
+
+    failures = []
+    parts, _applied, warns = core.create_parts(
+        bpy.context, model, [cut], keep_original=True, failures=failures)
+    check("the fin case separates after auto-adjusting", len(parts) == 2,
+          f"got {len(parts)}: {failures}")
+    check("nothing failed", not failures, str(failures))
+    check("it reported raising Edge Margin",
+          any("Edge Margin" in w for w in warns), str(warns))
+    check("Edge Margin was actually raised", cut.pp_margin > started_at,
+          f"{started_at} → {cut.pp_margin}")
+    for p in parts:
+        check(f"part closed: {p.name}", is_closed(core, p))
+    if len(parts) == 2:
+        probes = surface.probe_cut_line(cut, model)
+        bad, _s, summary = surface.probe_summary(probes, cut)
+        check("the line reads clean once the reach is right", not bad,
+              summary)
+
+
+def scenario_check_operator(core):
+    print("Scenario: Check Cut Line operator")
+    reset_scene()
+    from part_pin import surface
+    s = bpy.context.scene.part_pin
+    model = make_limb_with_fin(core)
+    s.target = model
+    cut = collar_cut(core, surface, model)
+    bpy.context.view_layer.objects.active = cut
+    before = cut.pp_margin
+
+    check("operator is registered",
+          hasattr(bpy.ops.partpin, "check_cut_line"))
+    bpy.ops.partpin.check_cut_line(fix=False)
+    check("checking alone changes nothing", cut.pp_margin == before,
+          f"{before} → {cut.pp_margin}")
+    bpy.ops.partpin.check_cut_line(fix=True)
+    check("Fix Margin raises Edge Margin", cut.pp_margin > before,
+          f"{before} → {cut.pp_margin}")
+
+    failures = []
+    parts, _applied, _warns = core.create_parts(
+        bpy.context, model, [cut], keep_original=True, failures=failures)
+    check("the fixed margin cuts cleanly", len(parts) == 2,
+          f"got {len(parts)}: {failures}")
+
+
 def scenario_unusable_line_reports(core):
     print("Scenario: a line that encloses nothing says so")
     reset_scene()
@@ -1260,6 +1404,9 @@ def main():
     scenario_collar_cut(core)
     scenario_collar_full_extent(core)
     scenario_collar_plus_leftover_line(core)
+    scenario_probe_finds_trouble(core)
+    scenario_auto_reach(core)
+    scenario_check_operator(core)
     scenario_unusable_line_reports(core)
     scenario_modal_helpers(core)
     scenario_operators_registered(core)

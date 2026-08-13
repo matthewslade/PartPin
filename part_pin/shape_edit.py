@@ -16,6 +16,12 @@ from . import core, surface
 LINE_COLOR = (1.0, 0.62, 0.16, 1.0)
 LINE_COLOR_HIDDEN = (1.0, 0.62, 0.16, 0.22)
 POINT_COLOR = (0.96, 0.96, 0.96, 1.0)
+
+# Trouble spots found along the cut line, by kind.
+PROBE_COLORS = {
+    surface.PROBE_MARGIN: (1.0, 0.78, 0.0, 1.0),  # amber: needs more reach
+    surface.PROBE_STUCK: (1.0, 0.15, 0.15, 1.0),  # red: material runs on
+}
 POINT_HOVER = (1.0, 0.95, 0.35, 1.0)
 POINT_ACTIVE = (0.35, 1.0, 0.45, 1.0)
 
@@ -25,7 +31,7 @@ SEGMENT_SUBDIV = 8
 STATUS = ("Drag points on the model to reshape the cut    "
           "Ctrl+Click: add point    X: remove point    "
           "Alt+X: remove whole line    Ctrl+Wheel: falloff    "
-          "Enter: confirm    Esc: cancel")
+          "C: re-check line    Enter: confirm    Esc: cancel")
 
 
 def _draw_lines(points, color, width, depth_test):
@@ -117,6 +123,8 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         self.dragging = -1
         self.moved = False
         self._cache = None
+        self._probe_points = {}
+        self.probe_summary = ""
         self._rebuild_cache()
 
         self._handle = bpy.types.SpaceView3D.draw_handler_add(
@@ -124,6 +132,7 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         context.workspace.status_text_set(STATUS)
         context.window.cursor_modal_set('CROSSHAIR')
         context.window_manager.modal_handler_add(self)
+        self._run_probe(context)
         self.area.tag_redraw()
         self.report({'INFO'}, "Drag the points on the model to shape the cut")
         return {'RUNNING_MODAL'}
@@ -137,8 +146,32 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         if problem:
             context.workspace.status_text_set(
                 "CANNOT CUT: " + problem.split(' — ')[0] + "    " + STATUS)
+        elif self.probe_summary:
+            context.workspace.status_text_set(
+                self.probe_summary + "    " + STATUS)
         else:
             context.workspace.status_text_set(STATUS)
+
+    def _run_probe(self, context, announce=False):
+        """Test the line against the model and mark the spots that won't cut."""
+        self._probe_points = {}
+        self.probe_summary = ""
+        if not self.cut.pp_local:
+            return
+        try:
+            probes = surface.probe_cut_line(self.cut, self.target)
+        except Exception:
+            return
+        bad, _suggested, summary = surface.probe_summary(probes, self.cut)
+        for probe in bad:
+            self._probe_points.setdefault(probe['status'], []).append(
+                probe['position'])
+        self.probe_summary = summary if bad else ""
+        if announce:
+            self.report({'INFO'} if not bad else {'WARNING'}, summary)
+        self._update_status(context)
+        if self.area:
+            self.area.tag_redraw()
 
     def _pick_cut(self, context):
         active = context.view_layer.objects.active
@@ -375,9 +408,13 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
                         self.cut.pp_points[self.dragging].loop
                     surface.refit_frame(self.cut)
                     self._rebuild_cache()
-                    self._update_status(context)
+                    self._run_probe(context)
                 self.dragging = -1
                 return {'RUNNING_MODAL'}
+
+        if event.type == 'C' and event.value == 'PRESS' and not event.ctrl:
+            self._run_probe(context, announce=True)
+            return {'RUNNING_MODAL'}
 
         if event.type in {'X', 'DEL'} and event.value == 'PRESS':
             if event.alt:
@@ -446,6 +483,15 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
                 _draw_lines(line, LINE_COLOR_HIDDEN, 2.0, 'NONE')
                 _draw_lines(line, LINE_COLOR, 3.0, 'LESS_EQUAL')
 
+            # Where the cut cannot break through, marked on the line itself.
+            for status, points in (self._probe_points or {}).items():
+                colour = PROBE_COLORS.get(status)
+                if not points or colour is None:
+                    continue
+                _draw_points(points, (colour[0], colour[1], colour[2], 0.35),
+                             15.0)
+                _draw_points(points, colour, 9.0)
+
             world = self._cache['world']
             plain = [w for i, w in enumerate(world)
                      if i != self.hover and i != self.dragging]
@@ -460,6 +506,62 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
             gpu.state.depth_test_set('LESS_EQUAL')
             gpu.state.blend_set('NONE')
             gpu.state.point_size_set(1.0)
+
+
+def _surface_cut(context):
+    """The surface cut the user is working on, via the active object."""
+    active = context.view_layer.objects.active
+    if active is None:
+        return None
+    cut = (active if active.pp_role == core.ROLE_CUT
+           else active.parent if active.pp_role == core.ROLE_CONNECTOR
+           else None)
+    if cut is not None and cut.pp_cut_kind == 'SURFACE':
+        return cut
+    return None
+
+
+class PARTPIN_OT_check_cut_line(bpy.types.Operator):
+    bl_idname = "partpin.check_cut_line"
+    bl_label = "Check Cut Line"
+    bl_description = (
+        "Test the active cut's line against the model and report where it "
+        "will fail to separate. Open Edit Cut on Surface to see the trouble "
+        "spots marked on the line itself"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    fix: bpy.props.BoolProperty(
+        name="Fix Edge Margin",
+        description="Set Edge Margin to the value the line needs",
+        default=False,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        cut = _surface_cut(context)
+        return cut is not None and core.get_settings(context).target is not None
+
+    def execute(self, context):
+        cut = _surface_cut(context)
+        target = core.get_settings(context).target
+        problem = surface.cut_line_problem(cut) if cut.pp_local else None
+        if problem:
+            self.report({'ERROR'}, f"Cut '{cut.name}': {problem}")
+            return {'CANCELLED'}
+
+        probes = surface.probe_cut_line(cut, target)
+        bad, suggested, summary = surface.probe_summary(probes, cut)
+        if not bad:
+            self.report({'INFO'}, summary)
+            return {'FINISHED'}
+        if self.fix and suggested:
+            cut.pp_margin = suggested
+            self.report({'INFO'},
+                        f"Edge Margin set to {suggested:.3f} — {summary}")
+        else:
+            self.report({'WARNING'}, summary)
+        return {'FINISHED'}
 
 
 class PARTPIN_OT_snap_connectors(bpy.types.Operator):
@@ -514,6 +616,7 @@ class PARTPIN_OT_reset_cut_shape(bpy.types.Operator):
 
 CLASSES = (
     PARTPIN_OT_edit_cut_surface,
+    PARTPIN_OT_check_cut_line,
     PARTPIN_OT_snap_connectors,
     PARTPIN_OT_reset_cut_shape,
 )

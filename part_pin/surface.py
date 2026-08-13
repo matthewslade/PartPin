@@ -727,6 +727,50 @@ def patch_grid(cut, target, resolution, margin=None, indices=None):
         if core.point_inside(target, point):
             inside[index // n][index % n] = True
 
+    # Sweep each unmarked cell with a cross of short rays along the cut
+    # surface. Thin geometry — a strap, a fin, an armour plate — can be
+    # narrower than a cell and sit between sample points entirely, which
+    # leaves the pieces joined by it; whether that happened came down to how
+    # the grid happened to land. A wall crossing the cell is hit by the
+    # cross whatever the alignment.
+    model = evaluated(target)
+    to_local = model.matrix_world.inverted()
+    rotation = matrix.to_quaternion()
+    axis_u = to_local.to_3x3() @ (rotation @ Vector((1.0, 0.0, 0.0)))
+    axis_v = to_local.to_3x3() @ (rotation @ Vector((0.0, 1.0, 0.0)))
+    for index, (u, v) in enumerate(centres):
+        i, j = index // n, index % n
+        if inside[i][j]:
+            continue
+        centre = to_local @ (matrix @ Vector((u, v, centre_h[index])))
+        for axis, reach in ((axis_u, du), (axis_v, dv)):
+            step = axis.normalized() * (reach * 0.5)
+            hit, _loc, _nor, _idx = model.ray_cast(centre - step, axis,
+                                                   distance=reach)
+            if hit:
+                inside[i][j] = True
+                break
+
+    # Finally test the cell corners, taking a cell as material if any sample
+    # in it is.
+    corners = [(u0 + du * i, v0 + dv * j)
+               for i in range(n + 1) for j in range(n + 1)]
+    corner_h = field.eval_many(corners)
+    corner_inside = [[False] * (n + 1) for _ in range(n + 1)]
+    for index, (u, v) in enumerate(corners):
+        i, j = index // (n + 1), index % (n + 1)
+        if inside[min(i, n - 1)][min(j, n - 1)]:
+            continue  # cell already counted; skip the ray cast
+        point = matrix @ Vector((u, v, corner_h[index]))
+        corner_inside[i][j] = core.point_inside(target, point)
+    for i in range(n):
+        for j in range(n):
+            if inside[i][j]:
+                continue
+            if (corner_inside[i][j] or corner_inside[i + 1][j]
+                    or corner_inside[i][j + 1] or corner_inside[i + 1][j + 1]):
+                inside[i][j] = True
+
     keep = [[False] * n for _ in range(n)]
     labels, count = _label_regions(inside, n)
     if count:
@@ -771,7 +815,8 @@ def patch_grid(cut, target, resolution, margin=None, indices=None):
                for i in range(n + 1)]
     thickness = max(core.bbox_diagonal(target) * SEAM_FACTOR, 1e-9)
     return {'u0': u0, 'v0': v0, 'du': du, 'dv': dv, 'n': n,
-            'keep': keep, 'heights': heights, 'thickness': thickness}
+            'keep': keep, 'material': inside, 'heights': heights,
+            'thickness': thickness}
 
 
 def _patch_bm(patch, thickness=None):
@@ -831,6 +876,144 @@ def _patch_bm(patch, thickness=None):
                               vert(bottom, i, j + 1, -half)))
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     return bm
+
+
+# ----------------------------------------------------------------------
+# Diagnosing a cut line
+# ----------------------------------------------------------------------
+
+# What a probed spot along the cut line found.
+PROBE_OK = 'OK'          # the cut breaks out through the surface here
+PROBE_MARGIN = 'MARGIN'  # more material just past the line: needs more reach
+PROBE_STUCK = 'STUCK'    # material keeps going as far as the probe can see
+
+PROBE_ADVICE = {
+    PROBE_MARGIN: "have more material just outside the line (raise Edge Margin)",
+    PROBE_STUCK: ("have material running well past the line — take the line "
+                  "around it, or cut there instead"),
+}
+
+
+def _outward(poly, index):
+    """Unit uv direction pointing out of the polygon at a vertex."""
+    count = len(poly)
+    ax, ay = poly[(index - 1) % count]
+    bx, by = poly[(index + 1) % count]
+    tx, ty = bx - ax, by - ay
+    length = (tx * tx + ty * ty) ** 0.5
+    if length < 1e-12:
+        return None
+    normal = (ty / length, -tx / length)
+    u, v = poly[index]
+    step = length * 0.01
+    if _in_polygon(u + normal[0] * step, v + normal[1] * step, poly):
+        normal = (-normal[0], -normal[1])
+    return normal
+
+
+def probe_cut_line(cut, target, resolution=None, per_loop=48):
+    """Find the spots where this cut will fail to separate the model.
+
+    This tests the mechanism itself rather than guessing: it builds the
+    patch the cut would use and looks for
+
+      * material still being cut at the very edge of the cut's reach — the
+        piece carries on past the line (a strap, a fin, a spike) and the
+        cut stops mid-way through it, leaving the parts joined;
+      * stretches of the line sitting on nothing the cut will touch.
+
+    Returns dicts of world position, status and the reach (as a fraction of
+    the line's size) that spot would need.
+    """
+    indices, problem, _warning = loop_quality(cut)
+    if problem is not None or not indices:
+        return []
+    settings = get_settings_safe()
+    if resolution is None:
+        resolution = settings.surface_resolution if settings else 48
+    patch = patch_grid(cut, target, resolution, indices=indices)
+    if patch is None:
+        return []
+
+    loops = control_loops(cut)
+    field = field_for(cut, indices)
+    matrix = cut.matrix_world
+    u0, v0 = patch['u0'], patch['v0']
+    du, dv, n = patch['du'], patch['dv'], patch['n']
+    keep = patch['keep']
+    material = patch.get('material', keep)
+
+    def world_of(u, v):
+        return matrix @ Vector((u, v, field.eval(u, v)))
+
+    def cell_of(u, v):
+        return (int((u - u0) / du), int((v - v0) / dv))
+
+    results = []
+    # Cells kept right on the outer ring of the grid. The patch always grows
+    # at least one cell past the material it found, so material reaching the
+    # very edge means the cut was clipped there and stops mid-way through it.
+    for i in range(n):
+        for j in range(n):
+            if not material[i][j]:
+                continue
+            if 0 < i < n - 1 and 0 < j < n - 1:
+                continue
+            results.append({
+                'position': world_of(u0 + du * (i + 0.5),
+                                     v0 + dv * (j + 0.5)),
+                'status': PROBE_MARGIN,
+                'needed': cut.pp_margin * 2.5,
+            })
+
+    # Stretches of the line the cut will not touch at all.
+    for loop_index in indices:
+        poly = [(p.x, p.y) for p in loops[loop_index]]
+        dense = resample_loop([Vector((u, v, 0.0)) for u, v in poly],
+                              max(per_loop, len(poly)))
+        for point in dense:
+            i, j = cell_of(point.x, point.y)
+            covered = (0 <= i < n and 0 <= j < n and keep[i][j])
+            results.append({
+                'position': world_of(point.x, point.y),
+                'status': PROBE_OK if covered else PROBE_STUCK,
+                'needed': 0.0 if covered else cut.pp_margin * 2.5,
+            })
+    return results
+
+
+def get_settings_safe():
+    try:
+        return bpy.context.scene.part_pin
+    except AttributeError:
+        return None
+
+
+def probe_summary(probes, cut):
+    """(bad probe list, suggested margin, one-line summary)."""
+    if not probes:
+        return [], None, "No cut line to check"
+    bad = [p for p in probes if p['status'] != PROBE_OK]
+    line_points = sum(1 for p in probes
+                      if p['status'] in (PROBE_OK, PROBE_STUCK))
+    if not bad:
+        return [], None, (f"Cut line looks good — it closes round the region "
+                          f"and the cut reaches clear of it "
+                          f"({line_points} points checked)")
+
+    needed = max(p['needed'] for p in probes)
+    suggested = min(round(max(needed, cut.pp_margin * 2.5) + 0.005, 3), 0.5)
+    kinds = {}
+    for probe in bad:
+        kinds[probe['status']] = kinds.get(probe['status'], 0) + 1
+    described = [f"{count} spots {PROBE_ADVICE.get(status, status)}"
+                 for status, count in sorted(kinds.items(),
+                                             key=lambda kv: -kv[1])]
+    summary = "This cut will not separate: " + "; ".join(described)
+    if PROBE_MARGIN in kinds:
+        summary += (f". Edge Margin {cut.pp_margin:.3f} → try "
+                    f"{suggested:.3f}")
+    return bad, suggested, summary
 
 
 def build_local_slab(cut, target, resolution=48, scene=None):

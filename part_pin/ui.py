@@ -107,6 +107,12 @@ class PARTPIN_PT_shape(PARTPIN_PT_base, bpy.types.Panel):
             sub.prop(cut, "pp_margin")
             box.prop(cut, "pp_falloff")
             box.prop(s, "surface_resolution")
+            if cut.pp_local:
+                row = box.row(align=True)
+                row.operator("partpin.check_cut_line",
+                             text="Check Line", icon='ZOOM_ALL').fix = False
+                row.operator("partpin.check_cut_line",
+                             text="Fix Margin", icon='CHECKMARK').fix = True
             row = box.row(align=True)
             row.operator("partpin.snap_connectors", text="Snap Connectors")
             row.operator("partpin.reset_cut_shape", text="Flatten")

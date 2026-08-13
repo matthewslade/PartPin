@@ -688,10 +688,53 @@ def create_parts(context, target, cuts, keep_original=True, part_gap=0.0,
         if localized:
             parts, split_any = split_parts_local(parts, cutter, parts_coll)
             if not split_any:
-                failures.append(
-                    f"Cut '{cut.name}' did not separate anything. Raise Edge "
-                    "Margin so the cut breaks through the surface, or check "
-                    "its line goes right round the part you want removed")
+                # Work out from the model itself how far the cut has to reach
+                # to break through, and try once more at that margin rather
+                # than making the user guess.
+                remove_object(cutter)
+                cutter = None  # freed: never let the retry path touch it again
+                probes = surface.probe_cut_line(cut, target)
+                _bad, suggested, summary = surface.probe_summary(probes, cut)
+
+                # Try progressively further reaches: what the probe measured
+                # first, then a couple of standard steps up, so a cut that
+                # only needs more room succeeds without the user guessing.
+                was = cut.pp_margin
+                retried = None
+                attempted = set()
+                for candidate in (suggested, 0.15, 0.3):
+                    if not candidate:
+                        continue
+                    candidate = round(min(candidate, 0.5), 3)
+                    if candidate <= was or candidate in attempted:
+                        continue
+                    attempted.add(candidate)
+                    cut.pp_margin = candidate
+                    cutter, problem, _note = surface.build_local_slab(
+                        cut, target, resolution, scene)
+                    if cutter is None:
+                        continue
+                    parts, split_any = split_parts_local(
+                        parts, cutter, parts_coll)
+                    if split_any:
+                        retried = (was, candidate)
+                        break
+                    remove_object(cutter)
+                    cutter = None
+                if not retried:
+                    cut.pp_margin = was
+                if retried:
+                    warnings.append(
+                        f"Cut '{cut.name}': Edge Margin {retried[0]:.3f} was "
+                        f"not enough to break through, raised to "
+                        f"{retried[1]:.3f}")
+                else:
+                    failures.append(f"Cut '{cut.name}': {summary}. Use Check "
+                                    "Cut Line to see where on the line the "
+                                    "problem is")
+                    if cutter is not None:
+                        remove_object(cutter)
+                    continue
         else:
             parts, split_any = split_parts(parts, cutter, parts_coll)
             if not split_any:

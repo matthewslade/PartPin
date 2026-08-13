@@ -49,6 +49,7 @@ Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
    | Ctrl+Click | Add a point on the surface |
    | X | Remove the point under the cursor |
    | Alt+X | Remove a whole cut line (that region stops being cut) |
+   | C | Re-check the line and mark what would stop it cutting |
    | Ctrl+Wheel | Widen / tighten the falloff (how far each point's pull spreads) |
    | Enter | Confirm |
    | Esc | Revert |
@@ -78,14 +79,22 @@ Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
    re-fits itself to the line you are editing, so the region it fences
    is always one it can actually cut.
 
+   **When a cut won't separate, the line shows you why.** Trouble spots
+   are marked on the line as you work — amber where material carries on
+   just outside the line so the cut cannot reach clear of it, red where
+   material runs well past it (a strap, a fin, a spike bridging the two
+   halves). Press **C** to re-check, or use **Check Line** in the panel.
+   **Fix Margin** sets Edge Margin to the reach the line needs. Create
+   Parts also tries further reaches by itself and tells you when it had
+   to, so most of the time this sorts itself out.
+
    A cut picks up a line on **every** feature it crosses, and each one
    cuts. Hover a line and press **Alt+X** to drop the ones you don't
    want. Lines that end up in a different plane from the one you are
    editing cannot be cut alongside it: those are skipped and reported,
-   so use a separate cut for each region facing a different way. If a cut refuses to separate a region, raise *Edge Margin* — it
-   controls how far past the line the cut reaches to break through the
-   surface. Untick *Cut Inside Line Only* for the old behaviour of
-   splitting everything the surface meets.
+   so use a separate cut for each region facing a different way. Untick
+   *Cut Inside Line Only* for the old behaviour of splitting everything
+   the surface meets.
 
 4. **Add connectors** — with a cut active, **Add Connectors** places
    `Count` pins spaced along the cut cross-section. They are ordinary
@@ -126,6 +135,8 @@ step.
 - Drawn curved cuts (freehand stroke in the viewport)
 - On-surface fine-tuning: drag the cut line's points along the model to
   reshape the cut, with add/remove points and adjustable falloff
+- Trouble spots marked on the cut line when a cut cannot separate, with an
+  automatic fix for the common case
 - Localized cuts: only the region ring-fenced by the cut line is severed,
   leaving the rest of the model whole
 - Built-in connector shapes plus custom connector meshes
