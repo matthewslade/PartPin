@@ -139,12 +139,19 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         self._joined = []
         self._holes = []
         self._verdict = ""
+        stored = surface.JOIN_HINTS.get(cut.name) or {}
+        self._joined = list(stored.get('joined', ()))
+        self._holes = list(stored.get('holes', ()))
+        if self._joined or self._holes:
+            self._verdict = ("This cut did not separate — red: material "
+                             "carries on past the line; violet: the cut "
+                             "leaves the model. Press T to re-check")
         self._rebuild_cache()
         self._rebuild_cap()
 
         self._handle = bpy.types.SpaceView3D.draw_handler_add(
             self._draw, (context,), 'WINDOW', 'POST_VIEW')
-        context.workspace.status_text_set(STATUS)
+        self._update_status(context)
         context.window.cursor_modal_set('CROSSHAIR')
         context.window_manager.modal_handler_add(self)
         self.area.tag_redraw()
@@ -213,6 +220,10 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         if pieces >= 2:
             self._verdict = f"This cut separates into {pieces} parts"
             self.report({'INFO'}, self._verdict)
+        elif (surface.JOIN_HINTS.get(self.cut.name) or {}).get('tangled'):
+            self._verdict = ("The cut surface came out tangled — nudge a point, "
+                             "or lower Surface Detail")
+            self.report({'WARNING'}, self._verdict)
         else:
             self._joined, self._holes = joined, holes
             self._verdict = ("This cut would not separate — marked: red where "
@@ -230,22 +241,21 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         if not self.cut.pp_local:
             return
         try:
-            self._cap_tris = surface.cap_preview_tris(self.cut, self.target)
+            lift = (core.bbox_diagonal(self.target)
+                    * core.get_settings(bpy.context).line_lift)
+            self._cap_tris = surface.cap_preview_tris(self.cut, self.target,
+                                                     lift=lift)
         except Exception:
             self._cap_tris = []
 
     def _rebuild_cache(self):
         """Recompute the drawable cut line and the world control points.
 
-        Every sample is put onto the model's surface, not just those that
-        happened to be near it: between the points, the cut's own surface
-        wanders off the model, and leaving the line there is what makes it
-        look like it almost — but not quite — reaches the surface. It is then
-        lifted clear along the surface normal, since a line drawn exactly on a
-        surface is half-swallowed by it.
+        The line comes from the one definition of where it lies on the model,
+        the same one the cutting surface is built from, lifted clear so the
+        surface it lies on cannot swallow it.
         """
         cut = self.cut
-        field = surface.field_for(cut)
         matrix = cut.matrix_world
         model = surface.evaluated(self.target)
         inv_target = model.matrix_world.inverted()
@@ -253,7 +263,11 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         lift = (core.bbox_diagonal(self.target)
                 * core.get_settings(bpy.context).line_lift)
 
-        def on_model(point):
+        polylines = []
+        for ring in surface.line_samples(cut, self.target, lift=lift):
+            polylines.append(ring + [ring[0]])
+
+        def lifted(point):
             ok, near, normal, _index = model.closest_point_on_mesh(
                 inv_target @ point)
             if not ok:
@@ -264,27 +278,11 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
                 surfaced = surfaced + outward.normalized() * lift
             return surfaced
 
-        loops = surface.control_loops(cut)
-        polylines = []
-        for loop in loops:
-            line = []
-            for i, a in enumerate(loop):
-                b = loop[(i + 1) % len(loop)]
-                for k in range(SEGMENT_SUBDIV):
-                    t = k / SEGMENT_SUBDIV
-                    u = a.x + (b.x - a.x) * t
-                    v = a.y + (b.y - a.y) * t
-                    line.append(on_model(
-                        matrix @ Vector((u, v, field.eval(u, v)))))
-            if line:
-                line.append(line[0])
-            polylines.append(line)
-
         self._cache = {
-            'field': field,
+            'field': surface.field_for(cut),
             'polylines': polylines,
             'world': [matrix @ Vector(p.co) for p in cut.pp_points],
-            'drawn': [on_model(matrix @ Vector(p.co)) for p in cut.pp_points],
+            'drawn': [lifted(matrix @ Vector(p.co)) for p in cut.pp_points],
         }
 
     def _surface_hit(self, context, mouse):

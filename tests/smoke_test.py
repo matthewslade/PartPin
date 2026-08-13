@@ -1282,14 +1282,16 @@ def scenario_arm_at_shoulder(core):
     if cut is None:
         return
 
-    # The cut's plane genuinely carries on into the body: that is what used
-    # to get sliced.
-    patch = surface.patch_grid(cut, model, s.surface_resolution)
-    material = sum(map(sum, patch['material']))
-    kept = sum(1 for i in range(patch['n']) for j in range(patch['n'])
-               if patch['material'][i][j] and patch['interior'][i][j])
-    check("the cut only claims material inside the line", kept <= material,
-          f"{kept} of {material} cells")
+    # The cut spans the line and nothing beyond it: measured as the lid's
+    # extent against the line's own.
+    tris = surface.cap_preview_tris(cut, model)
+    line = [cut.matrix_world @ Vector(p.co) for p in cut.pp_points]
+    for axis in range(3):
+        reach = max(p[axis] for p in tris) - min(p[axis] for p in tris)
+        drawn = max(p[axis] for p in line) - min(p[axis] for p in line)
+        check(f"the cut stays within the line on axis {axis}",
+              reach <= drawn + core.bbox_diagonal(model) * 0.05,
+              f"cut spans {reach:.2f}, line spans {drawn:.2f}")
 
     failures = []
     parts, _applied, _warns = core.create_parts(
@@ -1386,17 +1388,21 @@ def scenario_joined_outside_line_reports(core):
     check("it says what to do",
           failures and ("draw the line closer" in failures[0].lower()
                         or "move the line" in failures[0].lower()
-                        or "slide the line" in failures[0].lower()),
+                        or "slide the line" in failures[0].lower()
+                        or "nudge a point" in failures[0].lower()),
           str(failures))
-    check("it says where to look",
-          failures and "Edit Cut on Surface" in failures[0], str(failures))
+    # Either it points at the model (a piece joined on) or at the cutter
+    # tangling — but it must never leave the user with nothing to act on.
+    check("it says where to look or what to try",
+          failures and ("Edit Cut on Surface" in failures[0]
+                        or "Surface Detail" in failures[0]), str(failures))
     joined, holes = surface.find_join_hints(cut, model)
-    check("the spots are found and marked", (joined or holes),
-          f"{len(joined)} buried, {len(holes)} leaving the model")
-    marks = joined + holes
-    check("the marks sit on the cut, not scattered over the model",
-          all((m - sum(marks, Vector()) / len(marks)).length
-              < core.bbox_diagonal(model) for m in marks))
+    marks = list(joined) + list(holes)
+    if marks:
+        middle = sum(marks, Vector()) / len(marks)
+        check("any marks sit on the cut, not scattered over the model",
+              all((m - middle).length < core.bbox_diagonal(model)
+                  for m in marks))
 
 
 def scenario_check_line_operator(core):

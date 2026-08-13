@@ -35,6 +35,10 @@ SEAM_FACTOR = 1e-4
 # model's size. Enough to start outside the model even in a crease.
 CAP_STEP_OUT = 1.5e-2
 
+# Samples per span between control points. One value for the line you see and
+# for the boundary of the surface that cuts, so the two cannot drift apart.
+LINE_SAMPLES_PER_SPAN = 8
+
 
 def evaluated(obj):
     """The object with modifiers applied — what actually gets cut."""
@@ -340,31 +344,6 @@ def loop_quality(cut, minimum_roundness=0.02, min_alignment=0.7):
 def usable_loop_indices(cut):
     indices, _problem, _warning = loop_quality(cut)
     return indices
-
-
-# Beyond this, reaching into the model is no longer a nick around a seam.
-UNDERCUT_LIMIT = 0.6
-
-
-def suggest_undercut(probes, cut, resolution=None):
-    """The Undercut that would reach through the material holding the piece,
-    or None when that material runs too deep to cut into sensibly.
-
-    A couple of grid cells are added on top of the measured depth: the cut
-    grows in whole cells, so landing exactly on the measurement would stop a
-    hair short and separate nothing.
-    """
-    depths = [p['needed'] for p in probes if p['status'] == PROBE_BRIDGE]
-    if not depths or any(d == float('inf') for d in depths):
-        return None
-    settings = get_settings_safe()
-    if resolution is None:
-        resolution = settings.surface_resolution if settings else 48
-    cell = 2.6 / max(int(resolution), 8)
-    wanted = round(max(depths) * 1.05 + cell * 2.0 + 0.01, 3)
-    if wanted <= cut.pp_undercut or wanted > UNDERCUT_LIMIT:
-        return None
-    return wanted
 
 
 def failure_reason(probes, cut, target=None):
@@ -704,16 +683,6 @@ def _closest_on_loop(u, v, poly):
     return best, best_distance
 
 
-def inside_loops(u, v, polys, margin=0.0):
-    """Inside any cut line, or within `margin` of one."""
-    for poly in polys:
-        if _in_polygon(u, v, poly):
-            return True
-        if margin > 0.0 and _distance_to_loop(u, v, poly) <= margin:
-            return True
-    return False
-
-
 def loop_inset(u, v, polys):
     """How far inside the nearest cut line a point is (negative = outside)."""
     best = -float('inf')
@@ -724,543 +693,9 @@ def loop_inset(u, v, polys):
     return best
 
 
-def _label_regions(mask, n):
-    """Label 4-connected True cells; returns (labels, count)."""
-    labels = [[-1] * n for _ in range(n)]
-    count = 0
-    for si in range(n):
-        for sj in range(n):
-            if not mask[si][sj] or labels[si][sj] >= 0:
-                continue
-            stack = [(si, sj)]
-            labels[si][sj] = count
-            while stack:
-                i, j = stack.pop()
-                for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                    a, b = i + di, j + dj
-                    if 0 <= a < n and 0 <= b < n and mask[a][b] \
-                            and labels[a][b] < 0:
-                        labels[a][b] = count
-                        stack.append((a, b))
-            count += 1
-    return labels, count
-
-
-def _dilate(mask, n, steps, blocked=None):
-    """Grow a mask, never into a blocked cell.
-
-    Growth exists only to push the cut out through the model's surface into
-    empty space just past the cut line. Blocking cells that hold material
-    outside the line is what keeps "cut inside line only" literally true:
-    the cut can then never take a bite out of a neighbouring feature.
-    """
-    for _ in range(max(int(steps), 0)):
-        grown = [row[:] for row in mask]
-        for i in range(n):
-            for j in range(n):
-                if not mask[i][j]:
-                    continue
-                for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                    a, b = i + di, j + dj
-                    if 0 <= a < n and 0 <= b < n:
-                        if blocked is not None and blocked[a][b]:
-                            continue
-                        grown[a][b] = True
-        mask = grown
-    return mask
-
-
-def densify_line(target, matrix, field, poly, subdivisions=4):
-    """Add points along the line, out where the cut really leaves the model.
-
-    A cut line is a ring of points joined by straight spans, so it cuts the
-    corners of the curve where the cut actually meets the surface, leaving a
-    hair of material just outside it. That hair is enough to hold the parts
-    together, which is why clipping the cut to the raw line does not
-    separate anything. Nudging the points between out to the real crossing
-    removes it.
-
-    Where the line runs across solid material — under an armpit, say — there
-    is no crossing to find, and the straight span is the honest answer: the
-    line itself is the boundary there.
-    """
-    count = len(poly)
-    if count < 3:
-        return list(poly)
-    dense = []
-    for index in range(count):
-        ax, ay = poly[index]
-        bx, by = poly[(index + 1) % count]
-        dense.append((ax, ay))
-        dx, dy = bx - ax, by - ay
-        length = (dx * dx + dy * dy) ** 0.5
-        if length < 1e-12:
-            continue
-        nx, ny = dy / length, -dx / length
-        probe = length * 0.02
-        if _in_polygon(ax + dx * 0.5 + nx * probe,
-                       ay + dy * 0.5 + ny * probe, poly):
-            nx, ny = -nx, -ny  # point the normal out of the polygon
-
-        step = length * 0.12
-        limit = length * 1.1
-        for k in range(1, max(int(subdivisions), 1)):
-            t = k / subdivisions
-            mx, my = ax + dx * t, ay + dy * t
-            here = matrix @ Vector((mx, my, field.eval(mx, my)))
-            if not core.point_inside(target, here):
-                dense.append((mx, my))  # already outside: the span is fine
-                continue
-            found = (mx, my)
-            travelled = step
-            while travelled <= limit:
-                px, py = mx + nx * travelled, my + ny * travelled
-                point = matrix @ Vector((px, py, field.eval(px, py)))
-                if not core.point_inside(target, point):
-                    found = (px, py)
-                    break
-                travelled += step
-            dense.append(found)
-    return dense
-
-
-def _patch_attempt(cut, target, field, polys, resolution, grow, pad):
-    """One pass of the patch mask over a given extent.
-
-    Returns (patch, spilled, crowded). `spilled` means the region being cut
-    ran off the edge of this extent, so the caller should widen it.
-    `crowded` means another feature comes within a cell of the region, so
-    the two may have merged and the caller should refine the grid.
-    """
-    us = [u for poly in polys for u, _v in poly]
-    vs = [v for poly in polys for _u, v in poly]
-    u0, u1 = min(us) - pad, max(us) + pad
-    v0, v1 = min(vs) - pad, max(vs) + pad
-
-    n = max(int(resolution), 8)
-    du, dv = (u1 - u0) / n, (v1 - v0) / n
-    centres = [(u0 + du * (i + 0.5), v0 + dv * (j + 0.5))
-               for i in range(n) for j in range(n)]
-    centre_h = field.eval_many(centres)
-    matrix = cut.matrix_world
-
-    inside = [[False] * n for _ in range(n)]
-    for index, (u, v) in enumerate(centres):
-        point = matrix @ Vector((u, v, centre_h[index]))
-        if core.point_inside(target, point):
-            inside[index // n][index % n] = True
-
-    # Sweep each unmarked cell with a cross of short rays along the cut
-    # surface. Thin geometry — a strap, a fin, an armour plate — can be
-    # narrower than a cell and sit between sample points entirely, which
-    # leaves the pieces joined by it; whether that happened came down to how
-    # the grid happened to land. A wall crossing the cell is hit by the
-    # cross whatever the alignment.
-    model = evaluated(target)
-    to_local = model.matrix_world.inverted()
-    rotation = matrix.to_quaternion()
-    axis_u = to_local.to_3x3() @ (rotation @ Vector((1.0, 0.0, 0.0)))
-    axis_v = to_local.to_3x3() @ (rotation @ Vector((0.0, 1.0, 0.0)))
-    for index, (u, v) in enumerate(centres):
-        i, j = index // n, index % n
-        if inside[i][j]:
-            continue
-        centre = to_local @ (matrix @ Vector((u, v, centre_h[index])))
-        for axis, reach in ((axis_u, du), (axis_v, dv)):
-            step = axis.normalized() * (reach * 0.5)
-            hit, _loc, _nor, _idx = model.ray_cast(centre - step, axis,
-                                                   distance=reach)
-            if hit:
-                inside[i][j] = True
-                break
-
-    # Finally test the cell corners, taking a cell as material if any sample
-    # in it is.
-    corners = [(u0 + du * i, v0 + dv * j)
-               for i in range(n + 1) for j in range(n + 1)]
-    corner_h = field.eval_many(corners)
-    corner_inside = [[False] * (n + 1) for _ in range(n + 1)]
-    for index, (u, v) in enumerate(corners):
-        i, j = index // (n + 1), index % (n + 1)
-        if inside[min(i, n - 1)][min(j, n - 1)]:
-            continue  # cell already counted; skip the ray cast
-        point = matrix @ Vector((u, v, corner_h[index]))
-        corner_inside[i][j] = core.point_inside(target, point)
-    for i in range(n):
-        for j in range(n):
-            if inside[i][j]:
-                continue
-            if (corner_inside[i][j] or corner_inside[i + 1][j]
-                    or corner_inside[i][j + 1] or corner_inside[i + 1][j + 1]):
-                inside[i][j] = True
-
-    # What a localized cut may remove: material inside its own cut line, and
-    # nothing else. Taking whole connected regions instead — on the grounds
-    # that they are continuous with what is inside the line — slices the
-    # entire model apart wherever the piece is joined to it in the cut plane,
-    # such as an arm at the shoulder.
-    dense = [densify_line(target, matrix, field, poly) for poly in polys]
-    interior = [[any(_in_polygon(*centres[i * n + j], poly)
-                     for poly in dense)
-                 for j in range(n)] for i in range(n)]
-    keep = [[inside[i][j] and interior[i][j] for j in range(n)]
-            for i in range(n)]
-    if not any(any(row) for row in keep):
-        return None
-
-    # Material outside the line is another part of the model and must
-    # survive, so growth for breaking out through the surface stops at it and
-    # otherwise spreads through empty space.
-    #
-    # It is allowed a bite right at the line, though. Where a piece joins the
-    # model there is no empty space to break out into — an arm at the armpit
-    # is welded to the body along the line itself — so a cut that refuses to
-    # touch anything outside the line could never free it. By default the
-    # bite is a cell or so, enough for a crease; Undercut widens it to free a
-    # piece that is recessed into the model. Either way it is a band along
-    # the line, so it lands on the seam and cannot carry off a whole feature.
-    span_uv = max(max(us) - min(us), max(vs) - min(vs), 1e-9)
-    bite = span_uv * cut.pp_undercut
-    skin = max(max(du, dv) * 1.5, bite)
-    other_material = [
-        [inside[i][j] and not interior[i][j]
-         and not any(_distance_to_loop(*centres[i * n + j], poly) <= skin
-                     for poly in dense)
-         for j in range(n)] for i in range(n)]
-    # Growth has to reach as far as the bite it is allowed, or widening the
-    # bite would let the cut into material it never actually reaches.
-    cell = max(min(du, dv), 1e-12)
-    keep = _dilate(keep, n, max(1, int(bite / cell + 0.5)) if bite else 1,
-                   blocked=other_material)
-
-    # Material being cut that reaches the edge of the extent means the piece
-    # continues past it: the slab would stop mid-way through and the parts
-    # would stay joined.
-    spilled = any(keep[i][j] for i in range(n)
-                  for j in (0, n - 1)) or any(
-        keep[i][j] for j in range(n) for i in (0, n - 1))
-
-    # Growth has to reach as far as the bite it is allowed, or widening the
-    # bite would let the cut into material it never actually reaches.
-    cell = max(min(du, dv), 1e-12)
-    keep = _dilate(keep, n, max(1, int(bite / cell + 0.5)) if bite else 1,
-                   blocked=other_material)
-
-    nodes = [(u0 + du * i, v0 + dv * j)
-             for i in range(n + 1) for j in range(n + 1)]
-    flat = field.eval_many(nodes)
-    heights = [[flat[i * (n + 1) + j] for j in range(n + 1)]
-               for i in range(n + 1)]
-    thickness = max(core.bbox_diagonal(target) * SEAM_FACTOR, 1e-9)
-    # How far the rim is stepped out through the surface: just enough to clear
-    # the staircase the grid leaves between the mask and the line. Any more and
-    # it starts cutting into whatever happens to lie beside the piece.
-    flare = max(du, dv) * 1.5
-    return {'u0': u0, 'v0': v0, 'du': du, 'dv': dv, 'n': n, 'flare': flare,
-            'keep': keep, 'material': inside, 'interior': interior,
-            'beyond': other_material, 'heights': heights,
-            'thickness': thickness}, spilled
-
-
-def patch_grid(cut, target, resolution, margin=None, indices=None,
-               pad_scale=1.0):
-    """Grid over the cut, with a mask of the cells to actually cut.
-
-    The mask is *where the cut surface runs through the model*, limited to
-    the material continuous with what lies inside this cut's lines. Deriving
-    it from real inside/outside tests rather than from the line's outline
-    keeps it correct however far the reshaped surface has moved.
-
-    The extent widens until the region being cut fits inside it, so a piece
-    that carries on past the line — a fin, a spike, a strap welded to it —
-    is still cut through rather than left holding the parts together.
-    """
-    loops = control_loops(cut)
-    if indices is None:
-        indices = usable_loop_indices(cut) or list(range(len(loops)))
-    polys = [[(p.x, p.y) for p in loops[i]] for i in indices]
-    if not polys:
-        return None
-    field = field_for(cut, indices)
-    us = [u for poly in polys for u, _v in poly]
-    vs = [v for poly in polys for _u, v in poly]
-    span = max(max(us) - min(us), max(vs) - min(vs), 1e-9)
-    factor = cut.pp_margin if margin is None else margin
-    grow = span * max(factor, 1e-4)
-    pad = max(grow * 3.0, field.radius if not field.is_flat else grow)
-    pad *= max(pad_scale, 1.0)
-
-    patch = None
-    detail = max(int(resolution), 8)
-    for _attempt in range(4):
-        result = _patch_attempt(cut, target, field, polys, detail, grow, pad)
-        if result is None:
-            return None
-        patch, spilled = result
-        if spilled:
-            pad *= 2.0
-            continue
-        break
-    return patch
-
-
-def flare_rim(bm, cut, target, distance):
-    """Push the slab's rim out through the model's surface.
-
-    To separate anything, the cut has to break out through the surface all
-    the way round its line. Growing it sideways in its own plane does that
-    on an open limb, but at a crease — an arm where it meets a shoulder —
-    sideways means straight into the body, which is not where the surface
-    is. Following the model's own outward normal at the rim steps out
-    through the surface instead, flaring the cut like a cone, and takes
-    almost nothing of what surrounds the piece.
-    """
-    rim = {v for face in bm.faces for v in face.verts
-           if any(edge.is_boundary for edge in v.link_edges)}
-    if not rim:
-        # A closed slab has no boundary edges, so pick the walls: their
-        # vertices are the ones shared by fewer than four faces.
-        rim = {v for v in bm.verts if len(v.link_faces) < 4}
-    if not rim:
-        return 0
-
-    model = evaluated(target)
-    to_model = model.matrix_world.inverted()
-    matrix = cut.matrix_world
-    inverse = matrix.inverted()
-    rotation = inverse.to_3x3()
-    moved = 0
-    for vert in rim:
-        world = matrix @ vert.co
-        ok, _location, normal, _index = model.closest_point_on_mesh(
-            to_model @ world)
-        if not ok or normal.length < 1e-9:
-            continue
-        outward = (model.matrix_world.to_3x3() @ normal).normalized()
-        vert.co = vert.co + (rotation @ outward) * distance
-        moved += 1
-    return moved
-
-
-def _patch_bm(patch, thickness=None):
-    """Mesh the masked patch: a closed slab, or an open sheet if thickness=0."""
-    u0, v0 = patch['u0'], patch['v0']
-    du, dv, n = patch['du'], patch['dv'], patch['n']
-    keep, heights = patch['keep'], patch['heights']
-    if thickness is None:
-        thickness = patch['thickness']
-    half = thickness * 0.5
-
-    bm = bmesh.new()
-    top, bottom = {}, {}
-
-    def vert(cache, i, j, offset):
-        if (i, j) not in cache:
-            cache[(i, j)] = bm.verts.new(
-                (u0 + du * i, v0 + dv * j, heights[i][j] + offset))
-        return cache[(i, j)]
-
-    def kept(i, j):
-        return 0 <= i < n and 0 <= j < n and keep[i][j]
-
-    for i in range(n):
-        for j in range(n):
-            if not keep[i][j]:
-                continue
-            bm.faces.new((vert(top, i, j, half), vert(top, i + 1, j, half),
-                          vert(top, i + 1, j + 1, half),
-                          vert(top, i, j + 1, half)))
-            if half <= 0.0:
-                continue
-            bm.faces.new((vert(bottom, i, j, -half),
-                          vert(bottom, i, j + 1, -half),
-                          vert(bottom, i + 1, j + 1, -half),
-                          vert(bottom, i + 1, j, -half)))
-            # Walls wherever the neighbouring cell is not part of the patch.
-            if not kept(i - 1, j):
-                bm.faces.new((vert(top, i, j, half),
-                              vert(top, i, j + 1, half),
-                              vert(bottom, i, j + 1, -half),
-                              vert(bottom, i, j, -half)))
-            if not kept(i + 1, j):
-                bm.faces.new((vert(top, i + 1, j, half),
-                              vert(bottom, i + 1, j, -half),
-                              vert(bottom, i + 1, j + 1, -half),
-                              vert(top, i + 1, j + 1, half)))
-            if not kept(i, j - 1):
-                bm.faces.new((vert(top, i, j, half),
-                              vert(bottom, i, j, -half),
-                              vert(bottom, i + 1, j, -half),
-                              vert(top, i + 1, j, half)))
-            if not kept(i, j + 1):
-                bm.faces.new((vert(top, i, j + 1, half),
-                              vert(top, i + 1, j + 1, half),
-                              vert(bottom, i + 1, j + 1, -half),
-                              vert(bottom, i, j + 1, -half)))
-    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
-    return bm
-
-
 # ----------------------------------------------------------------------
 # Diagnosing a cut line
 # ----------------------------------------------------------------------
-
-# What a probed spot along the cut line found.
-PROBE_OK = 'OK'          # the cut breaks out through the surface here
-PROBE_BRIDGE = 'BRIDGE'  # material crosses the line and holds the parts on
-PROBE_MARGIN = 'MARGIN'  # the region runs past the cut's own reach
-PROBE_STUCK = 'STUCK'    # this stretch of line is not on cuttable material
-
-PROBE_ADVICE = {
-    PROBE_BRIDGE: ("material crosses the line and will hold the piece on — "
-                   "take the line around it, or move the line"),
-    PROBE_MARGIN: ("the region carries on past the cut's reach — raise Edge "
-                   "Margin"),
-    PROBE_STUCK: "the line is not on material the cut can take",
-}
-
-
-def _outward(poly, index):
-    """Unit uv direction pointing out of the polygon at a vertex."""
-    count = len(poly)
-    ax, ay = poly[(index - 1) % count]
-    bx, by = poly[(index + 1) % count]
-    tx, ty = bx - ax, by - ay
-    length = (tx * tx + ty * ty) ** 0.5
-    if length < 1e-12:
-        return None
-    normal = (ty / length, -tx / length)
-    u, v = poly[index]
-    step = length * 0.01
-    if _in_polygon(u + normal[0] * step, v + normal[1] * step, poly):
-        normal = (-normal[0], -normal[1])
-    return normal
-
-
-def probe_cut_line(cut, target, resolution=None, per_loop=48):
-    """Find the spots where this cut will fail to separate the model.
-
-    This tests the mechanism itself rather than guessing: it builds the
-    patch the cut would use and looks for
-
-      * material still being cut at the very edge of the cut's reach — the
-        piece carries on past the line (a strap, a fin, a spike) and the
-        cut stops mid-way through it, leaving the parts joined;
-      * stretches of the line sitting on nothing the cut will touch.
-
-    Returns dicts of world position, status and the reach (as a fraction of
-    the line's size) that spot would need.
-    """
-    indices, problem, _warning = loop_quality(cut)
-    if problem is not None or not indices:
-        return []
-    settings = get_settings_safe()
-    if resolution is None:
-        resolution = settings.surface_resolution if settings else 48
-    patch = patch_grid(cut, target, resolution, indices=indices)
-    if patch is None:
-        return []
-
-    loops = control_loops(cut)
-    field = field_for(cut, indices)
-    matrix = cut.matrix_world
-    u0, v0 = patch['u0'], patch['v0']
-    du, dv, n = patch['du'], patch['dv'], patch['n']
-    keep = patch['keep']
-    material = patch.get('material', keep)
-
-    def world_of(u, v):
-        return matrix @ Vector((u, v, field.eval(u, v)))
-
-    def cell_of(u, v):
-        return (int((u - u0) / du), int((v - v0) / dv))
-
-    interior = patch.get('interior', keep)
-    beyond = patch.get('beyond', None)
-    results = []
-
-    # How deep the material outside the line goes, so a sensible Undercut can
-    # be suggested rather than guessed at. Measured by walking out through the
-    # material along the cut surface, which the grid's own extent would
-    # otherwise cut short and make the answer look bottomless.
-    polys = [[(p.x, p.y) for p in loops[i]] for i in indices]
-    us = [u for poly in polys for u, _v in poly]
-    vs = [v for poly in polys for _u, v in poly]
-    span_uv = max(max(us) - min(us), max(vs) - min(vs), 1e-9)
-    step = span_uv * 0.02
-    limit = span_uv * 1.5
-
-    def depth_at(u, v):
-        """How much further the material here runs, away from the line."""
-        nearest, distance = min(
-            (_closest_on_loop(u, v, poly) for poly in polys),
-            key=lambda found: found[1])
-        dx, dy = u - nearest[0], v - nearest[1]
-        length = (dx * dx + dy * dy) ** 0.5
-        if length < 1e-12:
-            return 0.0
-        dx, dy = dx / length, dy / length
-        travelled = distance
-        while travelled <= limit:
-            px, py = nearest[0] + dx * travelled, nearest[1] + dy * travelled
-            if not core.point_inside(
-                    target, matrix @ Vector((px, py, field.eval(px, py)))):
-                return travelled / span_uv
-            travelled += step
-        return float('inf')
-
-    # Material that crosses the line: it lies beyond the line, so the cut
-    # leaves it alone, yet it is right against the region being cut and will
-    # hold the piece on. This is the usual reason a line that looks right
-    # refuses to separate. Same tolerance as the cut itself uses, so the
-    # hair of material along the line is not mistaken for a neighbour.
-    for i in range(n):
-        for j in range(n):
-            if beyond is None or not beyond[i][j]:
-                continue
-            touches = False
-            for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                a, b = i + di, j + dj
-                if 0 <= a < n and 0 <= b < n and keep[a][b]:
-                    touches = True
-                    break
-            if touches:
-                results.append({
-                    'position': world_of(u0 + du * (i + 0.5),
-                                         v0 + dv * (j + 0.5)),
-                    'status': PROBE_BRIDGE,
-                    'needed': depth_at(u0 + du * (i + 0.5),
-                                       v0 + dv * (j + 0.5)),
-                })
-
-    # The region being cut running off the edge of the cut's own reach.
-    for i in range(n):
-        for j in range(n):
-            if not (material[i][j] and interior[i][j]):
-                continue
-            if 0 < i < n - 1 and 0 < j < n - 1:
-                continue
-            results.append({
-                'position': world_of(u0 + du * (i + 0.5),
-                                     v0 + dv * (j + 0.5)),
-                'status': PROBE_MARGIN,
-                'needed': cut.pp_margin * 2.5,
-            })
-
-    # Stretches of the line the cut will not touch at all.
-    for loop_index in indices:
-        poly = [(p.x, p.y) for p in loops[loop_index]]
-        dense = resample_loop([Vector((u, v, 0.0)) for u, v in poly],
-                              max(per_loop, len(poly)))
-        for point in dense:
-            i, j = cell_of(point.x, point.y)
-            covered = (0 <= i < n and 0 <= j < n and keep[i][j])
-            results.append({
-                'position': world_of(point.x, point.y),
-                'status': PROBE_OK if covered else PROBE_STUCK,
-                'needed': 0.0 if covered else cut.pp_margin * 2.5,
-            })
-    return results
 
 
 def get_settings_safe():
@@ -1270,41 +705,56 @@ def get_settings_safe():
         return None
 
 
-def probe_summary(probes, cut):
-    """(bad probe list, suggested margin, one-line summary)."""
-    if not probes:
-        return [], None, "No cut line to check"
-    bad = [p for p in probes if p['status'] != PROBE_OK]
-    line_points = sum(1 for p in probes
-                      if p['status'] in (PROBE_OK, PROBE_STUCK))
-    if not bad:
-        return [], None, (f"Cut line looks good — it closes round the region "
-                          f"and nothing crosses it "
-                          f"({line_points} points checked)")
+def line_samples(cut, target, indices=None,
+                 per_span=LINE_SAMPLES_PER_SPAN, lift=0.0):
+    """The cut line as it lies on the model: one dense ring per cut line.
 
-    needed = max(p['needed'] for p in probes)
-    suggested = min(round(max(needed, cut.pp_margin * 2.5) + 0.005, 3), 0.5)
-    kinds = {}
-    for probe in bad:
-        kinds[probe['status']] = kinds.get(probe['status'], 0) + 1
-    blockers = {s: c for s, c in kinds.items() if s != PROBE_BRIDGE}
-    if not blockers:
-        # Material against the line is normal — a piece is joined to the
-        # model somewhere. It is only worth mentioning, not a warning.
-        return bad, None, (f"Cut line encloses a region; "
-                           f"{kinds[PROBE_BRIDGE]} spots along it run against "
-                           "the rest of the model, which stays whole")
-    described = [f"{count} spots where {PROBE_ADVICE.get(status, status)}"
-                 for status, count in sorted(blockers.items(),
-                                             key=lambda kv: -kv[1])]
-    summary = ("May stop this cut separating: " + "; ".join(described))
-    if PROBE_BRIDGE in kinds:
-        summary += (f" ({kinds[PROBE_BRIDGE]} spots run against material "
-                    "outside the line, which is left whole)")
-    if PROBE_MARGIN in blockers:
-        summary += (f". Edge Margin {cut.pp_margin:.3f} → try "
-                    f"{suggested:.3f}")
-    return bad, suggested, summary
+    The single definition of where the line runs. Both the line you see and
+    the boundary of the surface that cuts are built from this, so they agree
+    exactly — building them separately left the two disagreeing by a corner's
+    width, which is visible as the highlight not quite meeting the line.
+    """
+    loops = control_loops(cut)
+    if indices is None:
+        indices = usable_loop_indices(cut) or list(range(len(loops)))
+    field = field_for(cut, indices)
+    matrix = cut.matrix_world
+    model = evaluated(target)
+    to_model = model.matrix_world.inverted()
+    normal_matrix = model.matrix_world.to_3x3()
+
+    rings = []
+    for index in indices:
+        loop = loops[index]
+        if len(loop) < 3:
+            continue
+        # Spaced evenly along the whole ring, but always breaking at the
+        # control points, so corners stay corners and no stretch is sampled
+        # coarsely just because it is long.
+        spans = [(loop[(i + 1) % len(loop)] - a).length
+                 for i, a in enumerate(loop)]
+        spacing = max(sum(spans) / (len(loop) * max(int(per_span), 1)), 1e-9)
+
+        ring = []
+        for i, a in enumerate(loop):
+            b = loop[(i + 1) % len(loop)]
+            steps = max(1, int(round(spans[i] / spacing)))
+            for k in range(steps):
+                t = k / steps
+                u = a.x + (b.x - a.x) * t
+                v = a.y + (b.y - a.y) * t
+                world = matrix @ Vector((u, v, field.eval(u, v)))
+                ok, near, normal, _index = model.closest_point_on_mesh(
+                    to_model @ world)
+                if ok:
+                    world = model.matrix_world @ near
+                    outward = normal_matrix @ normal
+                    if lift > 0.0 and outward.length > 1e-9:
+                        world = world + outward.normalized() * lift
+                ring.append(world)
+        if ring:
+            rings.append(ring)
+    return rings
 
 
 def cap_sheet(cut, target, usable, ring=96, relax=18, cuts=2,
@@ -1553,6 +1003,7 @@ def trial_cut(cut, target, scene=None):
     trial = core.duplicate_object(target, "PartPin_Trial", scene.collection)
     trial.hide_render = True
     pieces = 1
+    tangled = False
     try:
         if core.boolean_apply(trial, cap, 'DIFFERENCE'):
             parts = core.split_loose(trial)
@@ -1561,6 +1012,7 @@ def trial_cut(cut, target, scene=None):
             for part in kept:
                 core.remove_object(part)
         else:
+            tangled = True
             core.remove_object(trial)
     except Exception:
         pieces = 0
@@ -1568,15 +1020,21 @@ def trial_cut(cut, target, scene=None):
         core.remove_object(cap)
 
     if pieces >= 2:
-        JOIN_HINTS[cut.name] = {'joined': [], 'holes': []}
+        JOIN_HINTS[cut.name] = {'joined': [], 'holes': [], 'tangled': False}
         return pieces, [], []
     joined, holes = find_join_hints(cut, target)
-    JOIN_HINTS[cut.name] = {'joined': joined, 'holes': holes}
+    JOIN_HINTS[cut.name] = {'joined': joined, 'holes': holes,
+                            'tangled': tangled}
     return pieces, joined, holes
 
 
-def cap_preview_tris(cut, target, ring=56, relax=10, cuts=1):
-    """World-space triangles of the lid, for showing what the cut will be."""
+def cap_preview_tris(cut, target, ring=56, relax=10, cuts=1, lift=0.0):
+    """World-space triangles of the lid, for showing what the cut will be.
+
+    `lift` raises the rim by the same amount the cut line is drawn above the
+    surface, so on screen the lid meets the line instead of stopping a hair
+    short of it.
+    """
     usable, problem, _warning = loop_quality(cut, min_alignment=0.0)
     if problem is not None:
         return []
@@ -1585,6 +1043,20 @@ def cap_preview_tris(cut, target, ring=56, relax=10, cuts=1):
     if bm is None:
         return []
     matrix = cut.matrix_world
+    if lift > 0.0:
+        model = evaluated(target)
+        to_model = model.matrix_world.inverted()
+        normal_matrix = model.matrix_world.to_3x3()
+        inverse_rotation = matrix.inverted().to_3x3()
+        for vert in bm.verts:
+            if not vert.is_boundary:
+                continue
+            ok, _location, normal, _index = model.closest_point_on_mesh(
+                to_model @ (matrix @ vert.co))
+            outward = normal_matrix @ normal if ok else None
+            if outward and outward.length > 1e-9:
+                vert.co = vert.co + (inverse_rotation
+                                     @ outward.normalized()) * lift
     tris = []
     for face in bm.faces:
         corners = [matrix @ v.co for v in face.verts]
@@ -1620,39 +1092,6 @@ def build_cap_slab(cut, target, scene=None, ring=96, relax=18):
     bmesh.ops.solidify(bm, geom=list(bm.faces), thickness=thickness)
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     obj = core.new_mesh_object("PartPin_Cap", bm, scene.collection,
-                               matrix=cut.matrix_world.copy())
-    obj.hide_render = True
-    return obj, None, warning
-
-
-def build_local_slab(cut, target, resolution=48, scene=None):
-    """Thin closed slab spanning only the cut's ring-fenced region.
-
-    Subtracting this severs the model along the cut line and nowhere else;
-    the pieces then fall out as separate connected components. Returns
-    (object, problem, warning).
-    """
-    scene = scene or bpy.context.scene
-    # The cut line may have been dragged away from the plane the cut began
-    # on; re-fit before measuring anything in that plane.
-    refit_frame(cut)
-    usable, problem, warning = loop_quality(cut)
-    if problem is not None:
-        return None, problem, warning
-
-    patch = patch_grid(cut, target, resolution, indices=usable)
-    if patch is None:
-        return None, ("this cut's surface never passes through the model "
-                      "inside its cut line — check the line lies on the "
-                      "model"), warning
-    bm = _patch_bm(patch)
-    if not bm.faces:
-        bm.free()
-        return None, "this cut covers no area of the model", warning
-    # Step the rim out through the surface rather than sideways into whatever
-    # the piece is joined to.
-    flare_rim(bm, cut, target, patch['flare'])
-    obj = core.new_mesh_object("PartPin_Slab", bm, scene.collection,
                                matrix=cut.matrix_world.copy())
     obj.hide_render = True
     return obj, None, warning

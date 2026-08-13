@@ -631,7 +631,7 @@ def drop_debris(pieces, share=1e-4):
     return (kept or pieces), dropped
 
 
-def split_parts_local(parts, slab, parts_coll, debris=None):
+def split_parts_local(parts, slab, parts_coll, debris=None, tangled=None):
     """Sever parts with a thin slab and keep the resulting pieces.
 
     Unlike a plane cutter this only separates what the slab actually
@@ -644,6 +644,12 @@ def split_parts_local(parts, slab, parts_coll, debris=None):
     for part in parts:
         work = duplicate_object(part, part.name, parts_coll)
         if not boolean_apply(work, slab, 'DIFFERENCE'):
+            # An empty result means the cutter tangled: the solver cannot make
+            # sense of a surface that crosses itself, and returns nothing. That
+            # is a different problem from the piece being joined on, and worth
+            # saying so rather than blaming the line.
+            if tangled is not None:
+                tangled[0] = True
             remove_object(work)
             result.append(part)
             continue
@@ -723,8 +729,10 @@ def create_parts(context, target, cuts, keep_original=True, part_gap=0.0,
 
         if localized:
             crumbs = [0]
+            knotted = [False]
             parts, split_any = split_parts_local(parts, cutter, parts_coll,
-                                                 debris=crumbs)
+                                                 debris=crumbs,
+                                                 tangled=knotted)
             if crumbs[0]:
                 warnings.append(
                     f"Cut '{cut.name}': dropped {crumbs[0]} sliver(s) of no "
@@ -735,7 +743,12 @@ def create_parts(context, target, cuts, keep_original=True, part_gap=0.0,
                 # the one thing this mode promises not to do.
                 remove_object(cutter)
                 cutter = None
-                reason = surface.failure_reason(None, cut, target)
+                if knotted[0]:
+                    reason = ("the cut surface came out tangled, so the solver "
+                              "returned nothing. Nudge a point on the line, or "
+                              "lower Surface Detail, and try again")
+                else:
+                    reason = surface.failure_reason(None, cut, target)
                 failures.append(f"Cut '{cut.name}': {reason}")
                 continue
         else:

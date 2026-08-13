@@ -120,6 +120,9 @@ Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
    surface. Draw round an arm at the armpit and the arm comes away, with
    the body untouched, for about 0.01% of the model's volume at the seam.
 
+   Marks from a cut that would not separate are shown as soon as you open
+   the editor, so you do not have to know to ask for them.
+
    **Will this cut work? Press T, or hit Try This Cut.** The cut is made
    on a copy, and you are told whether it separates. Nothing is marked when
    it does — parts of a cut surface often pass outside the model without
@@ -211,6 +214,12 @@ On macOS the binary is usually
 
 - Boolean cutting is exact but not instant: multi-million-poly meshes
   take a while. Cut before subdividing when you can.
+- The cut surface can come out self-crossing on an awkward line, and the
+  exact solver then returns nothing rather than a cut. That is reported as
+  such — nudging a point or lowering *Surface Detail* usually clears it —
+  but it remains the roughest edge in the tool.
+- The highlight's edge follows the line to within about a sample's width,
+  so on a sharply cornered line it can appear to clip a corner slightly.
 - Curved cuts assume one stroke drawn across the model (or a closed
   loop). Strongly self-intersecting scribbles won't produce a valid cut
   volume.
