@@ -347,7 +347,7 @@ def usable_loop_indices(cut):
 
 
 def line_rings(cut, target):
-    """(rings, normals, cut normal) for a cut's lines, or three Nones.
+    """(rings, normals, cut normal, settle) for a cut, or four Nones.
 
     The single entry point the cutter takes its lines from.
     """
@@ -1110,7 +1110,7 @@ def trial_cut(cut, target, scene=None):
     from . import mesh_cut  # local import: mesh_cut builds on this module
 
     scene = scene or bpy.context.scene
-    rings, normals, normal = mesh_cut.line_rings(cut, target)
+    rings, normals, normal, settle = mesh_cut.line_rings(cut, target)
     if rings is None:
         return 0, [], []
 
@@ -1119,7 +1119,8 @@ def trial_cut(cut, target, scene=None):
     pieces = 1
     try:
         cut_pieces, _problem = mesh_cut.cut_object(trial, rings, normals,
-                                                  normal, scene)
+                                                  normal, scene,
+                                                  settle=settle)
         if cut_pieces is not None:
             pieces = len(cut_pieces)
             for part in cut_pieces:

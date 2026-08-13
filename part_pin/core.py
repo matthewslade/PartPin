@@ -631,7 +631,8 @@ def drop_debris(pieces, share=1e-4):
     return (kept or pieces), dropped
 
 
-def split_parts_surgery(parts, rings, normals, normal, scene, parts_coll):
+def split_parts_surgery(parts, rings, normals, normal, scene, parts_coll,
+                        settle=None):
     """Cut every part the drawn line runs across, and leave the rest whole.
 
     A line only ever crosses one of the parts on the table, and it may cross
@@ -644,7 +645,7 @@ def split_parts_surgery(parts, rings, normals, normal, scene, parts_coll):
     split_any = False
     for part in parts:
         pieces, _problem = mesh_cut.cut_object(part, rings, normals, normal,
-                                               scene, parts_coll)
+                                               scene, parts_coll, settle)
         if pieces is None:
             result.append(part)
             continue
@@ -735,7 +736,7 @@ def create_parts(context, target, cuts, keep_original=True, part_gap=0.0,
 
     for cut in cuts:
         if surface.is_local(cut):
-            rings, normals, normal = surface.line_rings(cut, target)
+            rings, normals, normal, settle = surface.line_rings(cut, target)
             if rings is None:
                 failures.append(
                     f"Cut '{cut.name}': "
@@ -746,7 +747,8 @@ def create_parts(context, target, cuts, keep_original=True, part_gap=0.0,
             if note:
                 warnings.append(f"Cut '{cut.name}': {note}")
             parts, split_any = split_parts_surgery(parts, rings, normals,
-                                                   normal, scene, parts_coll)
+                                                   normal, scene, parts_coll,
+                                                   settle)
             if not split_any:
                 # Say why, and leave it at that. Reaching further to force a
                 # separation would cut material outside the line, which is

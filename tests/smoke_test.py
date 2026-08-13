@@ -1878,7 +1878,7 @@ def scenario_seam_lands_on_the_line(core):
     from part_pin import surface
 
     def measure(label, model, cut, allow):
-        rings, _normals, _normal = surface.line_rings(cut, model)
+        rings, _normals, _normal, _settle = surface.line_rings(cut, model)
         check(f"{label}: the line is there to check", bool(rings))
         if not rings:
             return

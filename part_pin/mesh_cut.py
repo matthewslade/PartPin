@@ -262,6 +262,10 @@ def _ear_clip(flat):
         return ((flat[a][0] - flat[o][0]) * (flat[b][1] - flat[o][1])
                 - (flat[a][1] - flat[o][1]) * (flat[b][0] - flat[o][0]))
 
+    def side(a, b):
+        return ((flat[a][0] - flat[b][0]) ** 2
+                + (flat[a][1] - flat[b][1]) ** 2) ** 0.5
+
     tris = []
     while len(order) > 3:
         size = len(order)
@@ -271,6 +275,7 @@ def _ear_clip(flat):
         reflex = {order[k] for k in range(size)
                   if cross(order[k - 1], order[k],
                            order[(k + 1) % size]) < -tiny}
+        best, best_score = None, -1.0
         for k in range(size):
             a, b, c = order[k - 1], order[k], order[(k + 1) % size]
             if b in reflex:
@@ -283,13 +288,242 @@ def _ear_clip(flat):
                    and cross(a, b, p) > tiny and cross(b, c, p) > tiny
                    and cross(c, a, p) > tiny for p in reflex):
                 continue
-            tris.append((a, b, c))
-            order.pop(k)
-            break
-        else:
+            # Take the roundest ear going, not the first one found. Always
+            # taking the first walks steadily round the loop and hangs every
+            # triangle off whichever corner it started at — a fan, which on a
+            # rim that is not flat is a cone with its point in the wrong place.
+            sides = side(a, b) * side(b, c) * side(c, a)
+            score = cross(a, b, c) / sides if sides > 1e-30 else 0.0
+            if score > best_score:
+                best, best_score = k, score
+        if best is None:
             return None  # no ear anywhere: the rim crosses itself
+        a, b, c = (order[best - 1], order[best],
+                   order[(best + 1) % size])
+        tris.append((a, b, c))
+        order.pop(best)
     tris.append(tuple(order))
     return tris
+
+
+# The cap is not filled straight across. Rings of points are stepped inwards
+# from the line, each one evened out, drawn in, and settled closer to the
+# line's own mean plane than the last. What that gives is a bevel following
+# the model round the edge of the cut and a flat floor in the middle of it —
+# instead of one surface stretched from the line to a single point on it.
+CAP_RINGS = 5          # steps inwards before the middle is filled in
+CAP_STEP = 0.16        # how far in each step goes, of the cut's own radius
+CAP_THINNING = 0.78    # of its points each step keeps
+CAP_SETTLE = 0.45      # of the way onto the cut's own surface each step goes
+CAP_EVENING = 2        # evening-out passes per step
+CAP_MIN_RING = 12
+CAP_BACKOFF = 5        # halvings of a step before the rings stop
+
+
+def _cap_frame(normal):
+    """(across, other, axis) — the cut's own plane, as three directions."""
+    axis = normal.normalized() if normal.length > 1e-9 else Vector((0, 0, 1))
+    across = axis.orthogonal().normalized()
+    return across, axis.cross(across).normalized(), axis
+
+
+def _flat_area(ring):
+    """Area the ring encloses, seen down the cut's normal."""
+    count = len(ring)
+    return abs(sum(ring[i].x * ring[(i + 1) % count].y
+                   - ring[(i + 1) % count].x * ring[i].y
+                   for i in range(count)) * 0.5)
+
+
+def _step_in(ring, distance):
+    """Every point moved in along the ring's own inward normal.
+
+    Not a scale about the middle. A cut whose line runs close in on one side
+    and far out on another — a collar with a fin standing off it — shrinks
+    unevenly under a scale, and the smaller copy crosses back out through the
+    larger one where the line dips in. Stepping in along the normals keeps the
+    ring the same distance inside all the way round, whatever shape it is.
+    """
+    count = len(ring)
+    twice_area = sum(ring[i].x * ring[(i + 1) % count].y
+                     - ring[(i + 1) % count].x * ring[i].y
+                     for i in range(count))
+    facing = 1.0 if twice_area > 0.0 else -1.0
+
+    def inward_of(a, b):
+        span = Vector((b.x - a.x, b.y - a.y))
+        if span.length < 1e-12:
+            return None
+        span.normalize()
+        return Vector((-span.y, span.x)) * facing
+
+    stepped = []
+    for i, point in enumerate(ring):
+        before = inward_of(ring[i - 1], point)
+        after = inward_of(point, ring[(i + 1) % count])
+        if before is None or after is None:
+            stepped.append(point.copy())
+            continue
+        # Move to where the two neighbouring stretches end up once both have
+        # come in, not straight in from the point itself. On a corner those
+        # are different places: coming straight in leaves the corner short of
+        # where its own edges went, and the ring doubles back over itself
+        # there. Very sharp corners are held back rather than sent flying.
+        bisector = before + after
+        if bisector.length < 1e-9:
+            stepped.append(point.copy())
+            continue
+        bisector.normalize()
+        lean = max(bisector.dot(before), 0.25)
+        stepped.append(Vector((point.x + bisector.x * distance / lean,
+                               point.y + bisector.y * distance / lean,
+                               point.z)))
+    return stepped
+
+
+def _next_ring(current, distance, evening):
+    """One step in from `current`: thinned, evened out, stepped in, settled
+    flatter. None if it will not hold at that distance."""
+    count = int(len(current) * CAP_THINNING)
+    if count < CAP_MIN_RING:
+        return None
+    evened = surface.resample_loop(current, min(count, len(current)),
+                                   cyclic=True)
+    for _pass in range(evening):
+        evened = [(evened[i - 1] + p * 2.0 + evened[(i + 1) % len(evened)])
+                  * 0.25 for i, p in enumerate(evened)]
+    ring = _step_in(evened, distance)
+    if surface.polygon_self_intersects([(p.x, p.y) for p in ring]):
+        return None
+    return ring
+
+
+def _bridge(outer, outer_ids, inner, inner_ids):
+    """Triangles filling the band between two rings, matched round them.
+
+    Matched by where each point sits along the **outer** ring. The inner one
+    was laid out by walking the outer at even steps, so that is where its
+    points belong; going by the inner's own spacing instead pairs a stretch of
+    one with a stretch of the other that is nowhere near it — and where the
+    line has a spur, as a collar round a fin does, the band folds over itself.
+    """
+    def along(points):
+        steps = [(points[(i + 1) % len(points)] - p).length
+                 for i, p in enumerate(points)]
+        total = sum(steps) or 1.0
+        marks, walked = [], 0.0
+        for step in steps:
+            marks.append(walked / total)
+            walked += step
+        return marks
+
+    n, m = len(outer), len(inner)
+    out_at = along(outer)
+    in_at = [k / m for k in range(m)]
+    tris, i, j = [], 0, 0
+    while i < n or j < m:
+        next_out = out_at[i + 1] if i + 1 < n else 1.0
+        next_in = in_at[j + 1] if j + 1 < m else 1.0
+        if j >= m or (i < n and next_out <= next_in):
+            tris.append((outer_ids[i], outer_ids[(i + 1) % n],
+                         inner_ids[j % m]))
+            i += 1
+        else:
+            tris.append((outer_ids[i % n], inner_ids[(j + 1) % m],
+                         inner_ids[j % m]))
+            j += 1
+    return tris
+
+
+def _band_tiles(outer, inner, band, points):
+    """Whether a band covers the space between two rings once and once only.
+
+    Both rings lie over the cut's plane, so the band between them has to come
+    to exactly the area between them: any less and there is a hole, any more
+    and two of its triangles overlap, which is a cap doubling back on itself.
+    Checked band by band, so a line that only allows two rings keeps those two
+    instead of losing the lot.
+    """
+    want = _flat_area(outer) - _flat_area(inner)
+    if want <= 0.0:
+        return False
+    covered = 0.0
+    for a, b, c in band:
+        pa, pb, pc = points[a], points[b], points[c]
+        covered += abs((pb.x - pa.x) * (pc.y - pa.y)
+                       - (pb.y - pa.y) * (pc.x - pa.x))
+    return abs(covered * 0.5 - want) <= want * 1e-6
+
+
+def _settle_ring(ring, settle, centre, across, other, axis):
+    """Move a ring part of the way onto the cut's own surface."""
+    if settle is None:
+        for point in ring:
+            point.z *= 1.0 - CAP_SETTLE
+        return
+    landed = settle([centre + across * p.x + other * p.y + axis * p.z
+                     for p in ring])
+    for point, target in zip(ring, landed):
+        point.z += ((target - centre).dot(axis) - point.z) * CAP_SETTLE
+
+
+def _cap_plan(rim_world, normal, settle=None):
+    """How to fill one rim. Returns (extra world points, triangles).
+
+    Triangles index the rim's own points first, then the extra ones.
+
+    `settle` puts world points onto the cut's own surface. Each ring inwards
+    goes part of the way there, so the cap leaves the line following the model
+    and arrives at the surface the cut is *for* — flat, unless the surface has
+    been shaped, and either way the surface the connectors were placed on.
+    """
+    across, other, axis = _cap_frame(normal)
+    centre = sum(rim_world, Vector()) / len(rim_world)
+    rim = [Vector(((p - centre).dot(across), (p - centre).dot(other),
+                   (p - centre).dot(axis))) for p in rim_world]
+
+    reach = (_flat_area(rim) / 3.141592653589793) ** 0.5 * CAP_STEP
+    tris, points = [], list(rim)
+    outer, outer_ids = rim, list(range(len(rim)))
+    for _step in range(CAP_RINGS):
+        # How far in a step can go depends on the line: a corner cannot be
+        # brought in further than it is round without turning inside out, and
+        # a line with a spur in it folds the band over itself long before
+        # that. So each step is offered and checked, shortened until it
+        # holds, and failing that evened out less — a line with a spur needs
+        # the evening left off, because that alone moves it enough sideways
+        # to fold the band. If none of it holds, the rings stop where they
+        # are and the rest is filled straight across.
+        made = None
+        for evening in range(CAP_EVENING, -1, -1):
+            distance = reach
+            for _try in range(CAP_BACKOFF):
+                ring = _next_ring(outer, distance, evening)
+                if ring is not None:
+                    _settle_ring(ring, settle, centre, across, other, axis)
+                    ring_ids = [len(points) + k for k in range(len(ring))]
+                    band = _bridge(outer, outer_ids, ring, ring_ids)
+                    if _band_tiles(outer, ring, band, points + ring):
+                        made = (ring, ring_ids, band)
+                        break
+                distance *= 0.5
+            if made is not None:
+                break
+        if made is None:
+            break
+        ring, ring_ids, band = made
+        tris.extend(band)
+        points.extend(ring)
+        outer, outer_ids = ring, ring_ids
+
+    middle = _ear_clip([(p.x, p.y) for p in outer])
+    if middle is None:
+        return None, None
+    tris.extend(tuple(outer_ids[k] for k in tri) for tri in middle)
+
+    extra = [centre + across * p.x + other * p.y + axis * p.z
+             for p in points[len(rim):]]
+    return extra, tris
 
 
 def _aligned(loop, positions):
@@ -318,7 +552,7 @@ def _aligned(loop, positions):
     return None
 
 
-def _cap_all(pieces, normal):
+def _cap_all(pieces, normal, settle=None):
     """Fill the holes the cut left. True if every piece came out closed.
 
     Both halves are filled from **one** triangulation of the rim. Filling them
@@ -331,10 +565,6 @@ def _cap_all(pieces, normal):
     loop seen down the cut's own normal, so flattening it that way and filling
     the polygon cannot produce a cap that folds.
     """
-    axis = normal.normalized() if normal.length > 1e-9 else Vector((0, 0, 1))
-    across = axis.orthogonal().normalized()
-    other = axis.cross(across).normalized()
-
     opened = []
     for piece in pieces:
         bm = bmesh.new()
@@ -354,24 +584,27 @@ def _cap_all(pieces, normal):
             spread = max((v.co - centre).length for v in loop)
             plan = next((p for p in plans
                          if len(p[0]) == len(loop)
-                         and (p[2] - centre).length < spread * 1e-4), None)
+                         and (p[3] - centre).length < spread * 1e-4), None)
             if plan is None:
-                flat = [(v.co.dot(across), v.co.dot(other)) for v in loop]
-                tris = _ear_clip(flat)
+                rim = [v.co.copy() for v in loop]
+                extra, tris = _cap_plan(rim, normal, settle)
                 if tris is None:
                     ok = False
                     break
-                plans.append(([v.co.copy() for v in loop], tris, centre))
+                plans.append((rim, extra, tris, centre))
                 ordered = loop
             else:
-                ordered = _aligned(loop, plan[0])
-                tris = plan[1]
+                rim, extra, tris = plan[0], plan[1], plan[2]
+                ordered = _aligned(loop, rim)
                 if ordered is None:
                     ok = False
                     break
+            # The rings are worked out once and built again here from the same
+            # positions, so both halves get the very same cap and still meet.
+            made = list(ordered) + [bm.verts.new(p) for p in extra]
             for a, b, c in tris:
                 try:
-                    bm.faces.new((ordered[a], ordered[b], ordered[c]))
+                    bm.faces.new((made[a], made[b], made[c]))
                 except ValueError:
                     pass  # that triangle is already there
         if not ok:
@@ -389,7 +622,7 @@ def _cap_all(pieces, normal):
     return ok
 
 
-def _part_and_cap(bm, layer, seam, normal, scene, collection):
+def _part_and_cap(bm, layer, seam, normal, scene, collection, settle=None):
     """Split the two sides apart and cap each. Returns the pieces."""
     bmesh.ops.delete(bm, geom=[f for f in bm.faces if f[layer]],
                      context='FACES')
@@ -405,11 +638,12 @@ def _part_and_cap(bm, layer, seam, normal, scene, collection):
     bpy.context.view_layer.update()
 
     pieces = core.split_loose(whole)
-    _cap_all(pieces, normal)
+    _cap_all(pieces, normal, settle)
     return pieces
 
 
-def cut_object(obj, rings, normals, normal, scene, collection=None):
+def cut_object(obj, rings, normals, normal, scene, collection=None,
+               settle=None):
     """Sever `obj` along the ring. Returns (pieces, problem).
 
     `pieces` is what it fell into when it worked and None when it did not;
@@ -426,7 +660,8 @@ def cut_object(obj, rings, normals, normal, scene, collection=None):
             continue
         bm, layer, seam = found
         try:
-            pieces = _part_and_cap(bm, layer, seam, normal, scene, collection)
+            pieces = _part_and_cap(bm, layer, seam, normal, scene,
+                                   collection, settle)
         except Exception:
             continue
         # A rung is only accepted on the evidence that it worked: the model
@@ -442,14 +677,31 @@ def cut_object(obj, rings, normals, normal, scene, collection=None):
 
 
 def line_rings(cut, target):
-    """(rings, normals, cut normal) for a cut's lines, or three Nones."""
+    """What the cutter needs of a cut's lines, or four Nones.
+
+    Returns (rings, their normals, the cut normal, settle), where `settle`
+    puts world points onto the cut's own surface — the one the connectors sit
+    on, and the one the middle of the cap is drawn down to.
+    """
     surface.refit_frame(cut)
     usable, problem, _warning = surface.loop_quality(cut, min_alignment=0.0)
     if problem is not None:
-        return None, None, None
+        return None, None, None, None
     rings = [ring for ring in surface.line_samples(cut, target, usable)
              if len(ring) >= 3]
     if not rings:
-        return None, None, None
+        return None, None, None, None
     normal = cut.matrix_world.to_quaternion() @ Vector((0.0, 0.0, 1.0))
-    return rings, [ring_normals(ring, target) for ring in rings], normal
+
+    field = surface.field_for(cut, usable)
+    matrix = cut.matrix_world
+    inverse = matrix.inverted()
+
+    def settle(points):
+        local = [inverse @ p for p in points]
+        heights = field.eval_many([(p.x, p.y) for p in local])
+        return [matrix @ Vector((p.x, p.y, h))
+                for p, h in zip(local, heights)]
+
+    return (rings, [ring_normals(ring, target) for ring in rings],
+            normal, settle)
