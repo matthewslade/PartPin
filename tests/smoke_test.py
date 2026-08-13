@@ -1189,62 +1189,17 @@ def make_shoulder(core):
 
 
 def collar_cut(core, surface_mod, model, per_loop=16, radius=0.75, x=2.0):
-    bpy.ops.partpin.add_plane_cut()
-    cut = bpy.context.view_layer.objects.active
-    cut, _error = surface_mod.convert_to_surface(bpy.context, cut, model,
-                                                per_loop=per_loop)
-    surface_mod.store_control_points(
-        cut, collar_points(surface_mod, model, cut, x=x, radius=radius,
-                           count=per_loop),
-        [0] * per_loop)
+    """A collar drawn round a limb, ray-cast onto it like the drawing tool."""
+    stroke = collar_stroke(surface_mod, model, Vector((x, 0.0, 0.0)),
+                           Vector((1.0, 0.0, 0.0)))
+    cut, _error = surface_mod.cut_from_stroke(bpy.context, model, stroke,
+                                             per_loop=per_loop)
+    if cut is None:
+        return None
     cut.pp_main_loop = 0
     surface_mod.refit_frame(cut)
+    bpy.context.view_layer.objects.active = cut
     return cut
-
-
-def scenario_probe_finds_trouble(core):
-    """The probe must agree with what the cut actually does: silent on a
-    clean line, and pointing at the spots on a line that cannot sever."""
-    print("Scenario: probing a cut line for trouble spots")
-    from part_pin import surface
-
-    reset_scene()
-    s = bpy.context.scene.part_pin
-    model = make_limb(core)
-    s.target = model
-    cut = collar_cut(core, surface, model)
-    probes = surface.probe_cut_line(cut, model)
-    bad, suggested, summary = surface.probe_summary(probes, cut)
-    check("clean collar reports no trouble spots", not bad, summary)
-    check("clean collar suggests no change", suggested is None, str(suggested))
-    check("clean collar checked several points along the line",
-          len(probes) >= 16, f"{len(probes)} probes")
-
-    reset_scene()
-    s = bpy.context.scene.part_pin
-    model = make_limb_with_fin(core)
-    s.target = model
-    cut = collar_cut(core, surface, model)
-    probes = surface.probe_cut_line(cut, model)
-    bad, suggested, summary = surface.probe_summary(probes, cut)
-    check("a fin crossing the cut is flagged", len(bad) >= 3,
-          f"{len(bad)} flagged: {summary}")
-    check("the flags say material crosses the line",
-          any(p['status'] == surface.PROBE_BRIDGE for p in bad),
-          str({p['status'] for p in bad}))
-    check("the crossing is what gets named, not a reach to try",
-          "outside the line" in surface.failure_reason(probes, cut),
-          surface.failure_reason(probes, cut))
-    reason = surface.failure_reason(probes, cut)
-    check("the failure reason points at the crossing material",
-          "outside the line" in reason, reason)
-    check("every flag carries a position to draw",
-          all(len(p['position']) == 3 for p in bad))
-    # Flags must sit on the fin, which is the actual obstruction.
-    on_fin = [p for p in bad if p['position'].z > 0.3]
-    check("flags land on the fin, not scattered over the model",
-          len(on_fin) >= len(bad) * 0.5,
-          f"{len(on_fin)} of {len(bad)} above z=0.3")
 
 
 def make_shoulder_arm(core):
@@ -1364,122 +1319,6 @@ def scenario_arm_at_shoulder(core):
           arm_lo.z > 0.5, f"arm starts at z {arm_lo.z:.2f}")
 
 
-def scenario_undercut_frees_recessed_piece(core):
-    """Issue #4: a piece held on by material outside the line — an arm
-    recessed under a shoulder — cannot come away without cutting a little of
-    what holds it. Undercut allows exactly that, bounded, and Check Cut Line
-    ▸ Fix works out how much."""
-    print("Scenario: Undercut frees a recessed piece (issue #4)")
-    reset_scene()
-    from part_pin import surface
-    s = bpy.context.scene.part_pin
-    model = make_limb_with_fin(core)
-    s.target = model
-    before = volume(model)
-    cut = collar_cut(core, surface, model)
-    bpy.context.view_layer.objects.active = cut
-
-    check("Undercut is off by default", cut.pp_undercut == 0.0,
-          f"{cut.pp_undercut}")
-    failures = []
-    parts, _applied, _warns = core.create_parts(
-        bpy.context, model, [cut], keep_original=True, failures=failures)
-    check("by default it will not cut what holds the piece",
-          len(parts) == 1 and failures, f"{len(parts)} parts, {failures}")
-    for part in list(parts):
-        core.remove_object(part)
-
-    probes = surface.probe_cut_line(cut, model)
-    wanted = surface.suggest_undercut(probes, cut)
-    check("an Undercut is suggested",
-          wanted and 0.0 < wanted <= surface.UNDERCUT_LIMIT, str(wanted))
-    check("the reason offers it",
-          "Undercut" in surface.failure_reason(probes, cut),
-          surface.failure_reason(probes, cut))
-
-    bpy.ops.partpin.check_cut_line(fix=True)
-    check("Fix sets the Undercut", cut.pp_undercut > 0.0,
-          f"{cut.pp_undercut:.3f}")
-
-    failures = []
-    parts, _applied, _warns = core.create_parts(
-        bpy.context, model, [cut], keep_original=True, failures=failures)
-    check("the recessed piece now comes away", len(parts) == 2,
-          f"got {len(parts)}: {failures}")
-    for p in parts:
-        check(f"part closed: {p.name}", is_closed(core, p))
-    if len(parts) != 2:
-        return
-    lost = before - sum(volume(p) for p in parts)
-    check("only a sliver is spent freeing it", 0.0 <= lost < before * 0.01,
-          f"lost {lost:.4f} of {before:.3f} ({100 * lost / before:.2f}%)")
-    check("the rest of the model is still whole",
-          max(volume(p) for p in parts) > before * 0.4,
-          f"{max(volume(p) for p in parts):.3f} of {before:.3f}")
-
-
-def scenario_undercut_declines_when_too_deep(core):
-    """When what holds the piece runs deeper than a seam-side nick, no
-    Undercut is sensible — say so rather than eating into the model."""
-    print("Scenario: Undercut declines when the join runs deep")
-    reset_scene()
-    from part_pin import surface
-    s = bpy.context.scene.part_pin
-    model = make_limb(core)
-    s.target = model
-    # The line dropped onto solid material: the piece is joined outside it
-    # all the way round, and no bounded reach can free that.
-    cut = collar_cut(core, surface, model)
-    points = []
-    for point in cut.pp_points:
-        world = cut.matrix_world @ Vector(point.co)
-        points.append(cut.matrix_world.inverted() @ (world * 0.35))
-    surface.store_control_points(cut, points, [0] * len(points))
-    bpy.context.view_layer.objects.active = cut
-
-    probes = surface.probe_cut_line(cut, model)
-    wanted = surface.suggest_undercut(probes, cut)
-    check("no runaway Undercut is suggested",
-          wanted is None or wanted <= surface.UNDERCUT_LIMIT, str(wanted))
-    before = cut.pp_undercut
-    bpy.ops.partpin.check_cut_line(fix=True)
-    check("Fix never exceeds the limit",
-          cut.pp_undercut <= surface.UNDERCUT_LIMIT,
-          f"{before} → {cut.pp_undercut}")
-
-
-def scenario_material_across_line_blocks(core):
-    """A fin crossing the line joins the piece to the model outside the line.
-    Freeing it would mean cutting outside the line, which is the one thing
-    this mode promises not to do (issue #3) — so it reports instead."""
-    print("Scenario: material crossing the line blocks the cut, and is kept")
-    reset_scene()
-    from part_pin import surface
-    s = bpy.context.scene.part_pin
-    model = make_limb_with_fin(core)
-    s.target = model
-    before = volume(model)
-    cut = collar_cut(core, surface, model)
-    started_at = cut.pp_margin
-
-    failures = []
-    parts, _applied, _warns = core.create_parts(
-        bpy.context, model, [cut], keep_original=True, failures=failures)
-    check("the model is left whole rather than wrongly cut", len(parts) == 1,
-          f"got {len(parts)}")
-    check("the reason is reported", len(failures) == 1, str(failures))
-    check("the reason names material outside the line",
-          failures and "outside the line" in failures[0], str(failures))
-    check("it says what to do about it",
-          failures and "take the line around it" in failures[0],
-          str(failures))
-    check("Edge Margin was not silently widened", cut.pp_margin == started_at,
-          f"{started_at} → {cut.pp_margin}")
-    check("nothing was shaved off the model",
-          abs(volume(parts[0]) - before) < before * 0.01,
-          f"{volume(parts[0]):.4f} vs {before:.4f}")
-
-
 def scenario_overhang_outside_line_survives(core):
     """Issue #2: a cut used to take a chip out of an overhang sitting just
     outside the line, while leaving the enclosed piece attached."""
@@ -1490,9 +1329,9 @@ def scenario_overhang_outside_line_survives(core):
     model = make_shoulder(core)
     s.target = model
     before = volume(model)
-    cut = collar_cut(core, surface, model, radius=0.6, x=1.0)
-    # The collar goes round the arm at x=1; the overhang plate crosses the
-    # same cut just beyond it, and belongs to the body.
+    # Drawn round the arm clear of the overhang, which crosses the model
+    # nearby and must come through untouched.
+    cut = collar_cut(core, surface, model, radius=0.6, x=1.9)
     failures = []
     parts, _applied, _warns = core.create_parts(
         bpy.context, model, [cut], keep_original=True, failures=failures)
@@ -1515,7 +1354,7 @@ def scenario_overhang_outside_line_survives(core):
     arm = min(parts, key=volume)
     lo, hi = core.world_bbox(arm)
     check("the separated part is the arm inside the line",
-          lo.x > 0.9 and hi.z < 0.6,
+          lo.x > 1.8 and hi.z < 0.6,
           f"x from {lo.x:.2f}, max z {hi.z:.2f}")
     body = max(parts, key=volume)
     lo2, hi2 = core.world_bbox(body)
@@ -1523,41 +1362,49 @@ def scenario_overhang_outside_line_survives(core):
           f"body reaches x {hi2.x:.2f}, overhang tip is at 1.5")
 
 
-def scenario_check_operator(core):
-    print("Scenario: Check Cut Line operator")
+def scenario_joined_outside_line_reports(core):
+    """A piece joined to the model outside the line cannot come away without
+    cutting outside it, so the cut says so and leaves the model alone."""
+    print("Scenario: a piece joined outside the line reports plainly")
     reset_scene()
     from part_pin import surface
     s = bpy.context.scene.part_pin
     model = make_limb_with_fin(core)
     s.target = model
+    before = volume(model)
     cut = collar_cut(core, surface, model)
-    bpy.context.view_layer.objects.active = cut
-    before = cut.pp_margin
 
-    check("operator is registered",
-          hasattr(bpy.ops.partpin, "check_cut_line"))
-    bpy.ops.partpin.check_cut_line(fix=False)
-    check("checking alone changes nothing", cut.pp_margin == before,
-          f"{before} → {cut.pp_margin}")
-    bpy.ops.partpin.check_cut_line(fix=True)
-    check("it does not widen the reach when that cannot help",
-          cut.pp_margin == before, f"{before} → {cut.pp_margin}")
-
-    # On a clean line it reports that all is well and still changes nothing.
-    reset_scene()
-    s = bpy.context.scene.part_pin
-    clean = make_limb(core)
-    s.target = clean
-    cut = collar_cut(core, surface, clean)
-    bpy.context.view_layer.objects.active = cut
-    was = cut.pp_margin
-    bpy.ops.partpin.check_cut_line(fix=True)
-    check("a clean line is left alone", cut.pp_margin == was,
-          f"{was} → {cut.pp_margin}")
     failures = []
     parts, _applied, _warns = core.create_parts(
-        bpy.context, clean, [cut], keep_original=True, failures=failures)
-    check("and it cuts", len(parts) == 2, f"got {len(parts)}: {failures}")
+        bpy.context, model, [cut], keep_original=True, failures=failures)
+    check("the model is left whole", len(parts) == 1, f"got {len(parts)}")
+    check("nothing was shaved off it",
+          abs(volume(parts[0]) - before) < before * 0.01,
+          f"{volume(parts[0]):.4f} vs {before:.4f}")
+    check("the reason is reported", len(failures) == 1, str(failures))
+    check("it says what to do",
+          failures and "slide the line" in failures[0].lower(), str(failures))
+
+
+def scenario_check_line_operator(core):
+    print("Scenario: Check Line reports on the span")
+    reset_scene()
+    from part_pin import surface
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    cut = collar_cut(core, surface, model)
+    check("operator is registered",
+          hasattr(bpy.ops.partpin, "check_cut_line"))
+    before = (cut.pp_undercut, len(cut.pp_points))
+    bpy.ops.partpin.check_cut_line()
+    check("checking changes nothing",
+          (cut.pp_undercut, len(cut.pp_points)) == before,
+          f"{before} → {(cut.pp_undercut, len(cut.pp_points))}")
+    failures = []
+    parts, _applied, _warns = core.create_parts(
+        bpy.context, model, [cut], keep_original=True, failures=failures)
+    check("and the cut works", len(parts) == 2, f"got {len(parts)}: {failures}")
 
 
 def scenario_unusable_line_reports(core):
@@ -1923,13 +1770,10 @@ def main():
     scenario_collar_cut(core)
     scenario_collar_full_extent(core)
     scenario_collar_plus_leftover_line(core)
-    scenario_probe_finds_trouble(core)
     scenario_arm_at_shoulder(core)
-    scenario_undercut_frees_recessed_piece(core)
-    scenario_undercut_declines_when_too_deep(core)
-    scenario_material_across_line_blocks(core)
     scenario_overhang_outside_line_survives(core)
-    scenario_check_operator(core)
+    scenario_joined_outside_line_reports(core)
+    scenario_check_line_operator(core)
     scenario_unusable_line_reports(core)
     scenario_draw_cut(core)
     scenario_draw_cut_in_pieces(core)

@@ -32,7 +32,7 @@ SEGMENT_SUBDIV = 8
 STATUS = ("Drag points on the model to reshape the cut    "
           "Ctrl+Click: add point    X: remove point    "
           "Alt+X: remove whole line    Ctrl+Wheel: falloff    "
-          "C: re-check line    Enter: confirm    Esc: cancel")
+          "Enter: confirm    Esc: cancel")
 
 
 def _draw_lines(points, color, width, depth_test):
@@ -133,7 +133,6 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         context.workspace.status_text_set(STATUS)
         context.window.cursor_modal_set('CROSSHAIR')
         context.window_manager.modal_handler_add(self)
-        self._run_probe(context)
         self.area.tag_redraw()
         self.report({'INFO'}, "Drag the points on the model to shape the cut")
         return {'RUNNING_MODAL'}
@@ -409,13 +408,9 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
                         self.cut.pp_points[self.dragging].loop
                     surface.refit_frame(self.cut)
                     self._rebuild_cache()
-                    self._run_probe(context)
+                    self._update_status(context)
                 self.dragging = -1
                 return {'RUNNING_MODAL'}
-
-        if event.type == 'C' and event.value == 'PRESS' and not event.ctrl:
-            self._run_probe(context, announce=True)
-            return {'RUNNING_MODAL'}
 
         if event.type in {'X', 'DEL'} and event.value == 'PRESS':
             if event.alt:
@@ -526,20 +521,10 @@ class PARTPIN_OT_check_cut_line(bpy.types.Operator):
     bl_idname = "partpin.check_cut_line"
     bl_label = "Check Cut Line"
     bl_description = (
-        "Test the active cut's line against the model and report where it "
-        "will fail to separate. Open Edit Cut on Surface to see the trouble "
-        "spots marked on the line itself"
+        "Check that this cut's line closes into a loop on the model that can "
+        "be spanned and cut"
     )
-    bl_options = {'REGISTER', 'UNDO'}
-
-    fix: bpy.props.BoolProperty(
-        name="Fix",
-        description=(
-            "Set Undercut to reach through whatever is holding the piece on, "
-            "or Edge Margin when the cut simply needs more room"
-        ),
-        default=False,
-    )
+    bl_options = {'REGISTER'}
 
     @classmethod
     def poll(cls, context):
@@ -554,33 +539,18 @@ class PARTPIN_OT_check_cut_line(bpy.types.Operator):
             self.report({'ERROR'}, f"Cut '{cut.name}': {problem}")
             return {'CANCELLED'}
 
-        probes = surface.probe_cut_line(cut, target)
-        bad, suggested, summary = surface.probe_summary(probes, cut)
-        if not bad:
-            self.report({'INFO'}, summary)
-            return {'FINISHED'}
-
-        undercut = surface.suggest_undercut(probes, cut)
-        if not self.fix:
-            if undercut:
-                summary += (f". Undercut {undercut:.2f} would cut through what "
-                            "is holding the piece on")
-            self.report({'WARNING'}, summary)
-            return {'FINISHED'}
-
-        if undercut:
-            cut.pp_undercut = undercut
-            self.report({'INFO'},
-                        f"Undercut set to {undercut:.2f}, enough to reach "
-                        "through what is holding the piece on")
-        elif suggested:
-            cut.pp_margin = suggested
-            self.report({'INFO'}, f"Edge Margin set to {suggested:.3f}")
-        else:
-            self.report({'WARNING'},
-                        summary + ". Nothing here can be fixed by reaching "
-                        "further — take the line around the material holding "
-                        "the piece on")
+        cap, problem, warning = surface.build_cap_slab(cut, target)
+        if warning:
+            self.report({'WARNING'}, warning)
+        if cap is None:
+            self.report({'ERROR'}, f"Cut '{cut.name}': {problem}")
+            return {'CANCELLED'}
+        faces = len(cap.data.polygons)
+        core.remove_object(cap)
+        self.report({'INFO'},
+                    f"Cut line spans a surface of {faces} faces — ready to "
+                    "cut. If nothing comes away, the piece is joined to the "
+                    "model outside the line: slide the line along it")
         return {'FINISHED'}
 
 

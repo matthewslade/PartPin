@@ -96,47 +96,21 @@ Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
    re-fits itself to the line you are editing, so the region it fences
    is always one it can actually cut.
 
-   **What gets cut: the material inside your line, and nothing else.**
-   Draw round an arm at the armpit and the arm comes away — the body it
-   was joined to is left whole, even though the cut's plane carries on
-   through it. The cut takes a bite of a grid cell or so just outside the
-   line where the piece is welded on, since there is nowhere else to break
-   out; that lands on the seam where the piece was.
+   **How the cut is made: from the perimeter, inwards.** Your line is
+   spanned by a lid — a surface drawn inwards from the line to its middle,
+   lying on the cut's own smooth surface — and that lid, thickened to a
+   hair, is what cuts. So the cut is decided by the perimeter and nothing
+   else: no plane to flatten the line onto, no grid deciding which side
+   counts, nothing reaching sideways into the model to break through the
+   surface. Draw round an arm at the armpit and the arm comes away, with
+   the body untouched, for about 0.01% of the model's volume at the seam.
 
-   To separate anything, a cut has to break out through the model's
-   surface all the way round your line. It does that by following the
-   model's own outward normal at the line — stepping out through the
-   surface, flaring slightly like a cone — rather than spreading sideways
-   in its own plane, which at a crease would head into the body instead of
-   out through the surface. That is what lets a line drawn in a crease,
-   such as an arm at the armpit, cut without touching what surrounds it.
-
-   **Recessed pieces: Undercut.** Some pieces are held on by material
-   outside the line — an arm sunk under a shoulder, or a mushroom stem
-   under its cap. They cannot come away without cutting a little of what
-   holds them. *Undercut* is how far the cut may reach into the model
-   around the line to do that: red marks appear where the piece is still
-   joined, **Check Line** measures how deep that material goes, and
-   **Fix** sets Undercut to reach through it. What it costs is a thin band
-   on the seam where the piece was — in testing, one hundredth of one
-   percent of the model.
-
-   Undercut is 0 by default, so nothing outside your line is touched
-   unless you ask. If the material holding the piece runs deeper than a
-   seam-side nick can reach, the cut says so instead of eating into the
-   model: take the line around it, or move it to where the piece is only
-   attached inside the line — the mushroom comes off cleanly if you cut
-   across the stem rather than at the cap.
-
-   **When a cut won't separate, the line shows you why.** Trouble spots
-   are marked on the line as you work — amber where material carries on
-   just outside the line so the cut cannot reach clear of it, red where
-   material runs well past it (a strap, a fin, a spike bridging the two
-   halves). Press **C** to re-check, or use **Check Line** in the panel.
-   **Fix Margin** sets Edge Margin to the reach the line needs. The cut
-   never widens its own reach into neighbouring material to force a
-   separation — it reports instead, because quietly taking a bite out of
-   the feature next door is worse than saying it could not do it.
+   If nothing comes away, the piece is joined to the model somewhere your
+   line does not cross. Slide the line along the piece to where it is
+   clear of what it is buried in — the mushroom rule: cut across the stem,
+   not at the cap — or take the line around whatever holds it. *Undercut*
+   lets the cut's rim reach further out through the surface for a piece
+   that starts buried inside another part of the model.
 
    A cut picks up a line on **every** feature it crosses, and each one
    cuts. Hover a line and press **Alt+X** to drop the ones you don't

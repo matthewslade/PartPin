@@ -114,17 +114,11 @@ class PARTPIN_PT_shape(PARTPIN_PT_base, bpy.types.Panel):
             sub = box.column()
             sub.enabled = cut.pp_local
             sub.prop(cut, "pp_undercut")
-            sub.prop(cut, "pp_margin")
             box.prop(cut, "pp_falloff")
             box.prop(s, "surface_resolution")
             if cut.pp_local:
-                row = box.row(align=True)
-                row.operator("partpin.check_cut_line",
-                             text="Check Line", icon='ZOOM_ALL').fix = False
-                row.operator("partpin.check_cut_line",
-                             text="Fix", icon='CHECKMARK').fix = True
-                box.label(text="Red marks: still joined outside the line",
-                          icon='INFO')
+                box.operator("partpin.check_cut_line", text="Check Line",
+                             icon='ZOOM_ALL')
             row = box.row(align=True)
             row.operator("partpin.snap_connectors", text="Snap Connectors")
             row.operator("partpin.reset_cut_shape", text="Flatten")
