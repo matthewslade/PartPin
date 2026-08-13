@@ -45,12 +45,21 @@ class PARTPIN_PT_cuts(PARTPIN_PT_base, bpy.types.Panel):
             layout.label(text="Draw one stroke across the model", icon='GREASEPENCIL')
             return
 
-        row = layout.row(align=True)
+        col = layout.column()
+        col.scale_y = 1.5
+        col.operator("partpin.draw_cut_line", icon='GREASEPENCIL',
+                     text="Draw Cut on Model")
+        layout.label(text="Draw the perimeter where you want the cut",
+                     icon='INFO')
+
+        box = layout.box()
+        box.label(text="Or start from a shape", icon='MESH_PLANE')
+        row = box.row(align=True)
         row.operator("partpin.add_plane_cut", icon='MESH_PLANE',
                      text="Straight")
         row.prop(s, "plane_axis", text="")
-        layout.operator("partpin.add_curve_cut", icon='GREASEPENCIL',
-                        text="Draw Curved Cut")
+        box.operator("partpin.add_curve_cut", icon='CURVE_BEZCURVE',
+                     text="Draw Across Model")
 
         cuts = core.scene_cuts(scene)
         if cuts:

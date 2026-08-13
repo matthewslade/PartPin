@@ -27,21 +27,38 @@ Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
 1. **Pick the model** in the PartPin panel, optionally hit **Check Mesh**
    (it must be closed/manifold — repair with Remesh or the bundled
    3D-Print Toolbox add-on if not).
-2. **Add cuts:**
-   - **Straight** — adds a wire cut plane through the 3D cursor (or model
-     center). Move / rotate / scale it like any object. Pick the axis in
+2. **Draw the cut on the model** — hit **Draw Cut on Model**, then hold
+   left mouse and draw the perimeter straight onto the surface. Every
+   position is ray-cast onto the model, so the line goes exactly where you
+   put it.
+
+   | Action | Result |
+   | --- | --- |
+   | Hold left mouse and draw | Lay the line onto the model's surface |
+   | Let go, orbit, draw again | Carry the perimeter round the far side — the stretches join up |
+   | Close at the green dot | Finish the loop and go straight to adjusting it |
+   | Enter | Close the loop from wherever you are |
+   | Backspace | Undo the last stretch |
+   | Esc | Cancel |
+
+   The green dot marks where you started and turns yellow when you are
+   close enough to close on it. When the loop closes it becomes an
+   ordinary editable cut and drops you straight into point editing
+   (step 3), so you can nudge it before cutting.
+
+   **Or start from a shape** instead, if that suits the model better:
+   - **Straight** — a wire cut plane through the 3D cursor (or model
+     centre). Move / rotate / scale it like any object; pick the axis in
      the dropdown next to the button.
-   - **Draw Curved Cut** — orient your view first, then draw one freehand
-     stroke across the model (start and end outside the silhouette) and
-     click **Finish Drawing**. The stroke becomes a cut surface extruded
-     along your view direction. A closed loop stroke cuts out a plug.
+   - **Draw Across Model** — orient the view, draw one stroke across the
+     model, and it becomes a cut extruded along your view direction.
    - Cuts are listed in the panel — click to select, tick to
      enable/disable, ✕ to delete. Nothing touches the model until you
      confirm.
-3. **Fine-tune the cut on the model** (optional, and the nicest way to
-   work) — hit **Edit Cut on Surface**. The cut plane itself disappears
-   and you get the actual line where the cut meets your model, with
-   draggable points sitting on its surface:
+3. **Fine-tune the line on the model** — you land here automatically after
+   drawing, or hit **Edit Cut on Surface** for a cut grown from a shape.
+   The cut object itself disappears and you get the line where the cut
+   meets your model, with draggable points sitting on its surface:
 
    | Action | Result |
    | --- | --- |
@@ -138,6 +155,8 @@ step.
 
 ## Features
 
+- Draw the cut perimeter directly onto the model, in as many stretches as
+  you like, then adjust it point by point
 - Draft mode: multiple editable cuts — enable, disable or remove them
   before anything is applied
 - Easy mode: one-click cut for simple models

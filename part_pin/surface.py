@@ -1268,6 +1268,72 @@ def convert_to_surface(context, cut, target, per_loop=16):
     return cut, None
 
 
+def stroke_to_loop(target, stroke, per_loop=16):
+    """Turn a drawn stroke into a closed ring of control points.
+
+    The stroke arrives as world points already on the model (each one a
+    ray-cast hit). It is closed, evened out along its length and pulled back
+    onto the surface, so every control point starts exactly where it was
+    drawn — and there are few enough of them to drag about afterwards.
+    """
+    points = []
+    for point in stroke:
+        if not points or (point - points[-1]).length > 1e-9:
+            points.append(Vector(point))
+    if len(points) < 3:
+        return []
+    if (points[0] - points[-1]).length < 1e-9:
+        points.pop()
+    count = max(int(per_loop), 6)
+    return [project_to_surface(target, p)
+            for p in resample_loop(points, count, cyclic=True)]
+
+
+def cut_from_stroke(context, target, stroke, per_loop=16, name="Drawn Cut"):
+    """Create a surface cut from a perimeter drawn on the model.
+
+    Returns (cut_object, error). The cut is the same kind of object the
+    on-surface editor already works with, so it can be adjusted point by
+    point and cut exactly like one grown from a plane.
+    """
+    loop = stroke_to_loop(target, stroke, per_loop)
+    if len(loop) < 6:
+        return None, "That stroke is too short to make a cut from"
+
+    origin, rotation = _base_frame_from_loops([loop])
+    matrix = Matrix.LocRotScale(origin, rotation, Vector((1.0, 1.0, 1.0)))
+    inverse = matrix.inverted()
+    local = [inverse @ p for p in loop]
+
+    flat = [(p.x, p.y) for p in local]
+    if polygon_self_intersects(flat):
+        return None, ("The drawn perimeter crosses itself when flattened, so "
+                      "the region it encloses is ambiguous. Redraw it as a "
+                      "single loop that does not double back")
+    if polygon_roundness(flat) < 0.02:
+        return None, ("The drawn perimeter does not enclose an area — draw it "
+                      "right round the part you want to remove")
+
+    scene = context.scene
+    draft = core.ensure_collection(scene, core.DRAFT_COLLECTION)
+    cut = bpy.data.objects.new(name,
+                               bpy.data.meshes.new("PartPin_CutSurface"))
+    draft.objects.link(cut)
+    cut.matrix_world = matrix
+    cut.pp_role = core.ROLE_CUT
+    cut.pp_cut_kind = 'SURFACE'
+    cut.pp_enabled = True
+    cut.pp_local = True
+    cut.pp_main_loop = 0
+    cut.pp_index = len(core.scene_cuts(scene)) - 1
+    cut.display_type = 'WIRE'
+    cut.show_in_front = False
+    cut.hide_render = True
+    store_control_points(cut, local, [0] * len(local))
+    build_display_mesh(cut, target)
+    return cut, None
+
+
 def snap_connectors(cut, field=None):
     """Move each connector back onto the (possibly reshaped) cut surface."""
     field = field or field_for(cut)

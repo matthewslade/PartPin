@@ -599,7 +599,39 @@ def split_loose(obj):
     return pieces
 
 
-def split_parts_local(parts, slab, parts_coll):
+def mesh_volume(obj):
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.transform(obj.matrix_world)
+    volume = bm.calc_volume(signed=False)
+    bm.free()
+    return volume
+
+
+def drop_debris(pieces, share=1e-4):
+    """Discard numerical crumbs left by a boolean.
+
+    A cut that grazes along the surface can shed slivers of no volume. They
+    are not parts anyone would print, and passing them on as parts means
+    stray specks in the collection and in the exported files.
+    """
+    if len(pieces) < 2:
+        return pieces, 0
+    volumes = [(piece, mesh_volume(piece)) for piece in pieces]
+    biggest = max(volume for _piece, volume in volumes)
+    if biggest <= 0.0:
+        return pieces, 0
+    kept, dropped = [], 0
+    for piece, volume in volumes:
+        if volume > biggest * share:
+            kept.append(piece)
+        else:
+            remove_object(piece)
+            dropped += 1
+    return (kept or pieces), dropped
+
+
+def split_parts_local(parts, slab, parts_coll, debris=None):
     """Sever parts with a thin slab and keep the resulting pieces.
 
     Unlike a plane cutter this only separates what the slab actually
@@ -607,13 +639,17 @@ def split_parts_local(parts, slab, parts_coll):
     """
     result = []
     split_any = False
+    if debris is None:
+        debris = [0]
     for part in parts:
         work = duplicate_object(part, part.name, parts_coll)
         if not boolean_apply(work, slab, 'DIFFERENCE'):
             remove_object(work)
             result.append(part)
             continue
-        pieces = split_loose(work)
+        pieces, crumbs = drop_debris(split_loose(work))
+        if crumbs:
+            debris[0] += crumbs
         if len(pieces) < 2:
             for piece in pieces:
                 remove_object(piece)
@@ -686,7 +722,13 @@ def create_parts(context, target, cuts, keep_original=True, part_gap=0.0,
             continue
 
         if localized:
-            parts, split_any = split_parts_local(parts, cutter, parts_coll)
+            crumbs = [0]
+            parts, split_any = split_parts_local(parts, cutter, parts_coll,
+                                                 debris=crumbs)
+            if crumbs[0]:
+                warnings.append(
+                    f"Cut '{cut.name}': dropped {crumbs[0]} sliver(s) of no "
+                    "volume left where the cut grazed the surface")
             if not split_any:
                 # Say why, and leave it at that. Reaching further to force a
                 # separation would cut material outside the line, which is

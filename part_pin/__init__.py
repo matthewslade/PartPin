@@ -8,7 +8,7 @@ for 3D printing.
 bl_info = {
     "name": "PartPin",
     "author": "PartPin contributors",
-    "version": (1, 3, 1),
+    "version": (1, 4, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport ▸ Sidebar (N) ▸ PartPin",
     "description": ("Split models into printable parts with matching "
@@ -25,20 +25,23 @@ if "props" in locals():
     importlib.reload(props)  # noqa: F821
     importlib.reload(ops)  # noqa: F821
     importlib.reload(shape_edit)  # noqa: F821
+    importlib.reload(draw_cut)  # noqa: F821
     importlib.reload(ui)  # noqa: F821
 else:
-    from . import core, ops, props, shape_edit, surface, ui
+    from . import core, draw_cut, ops, props, shape_edit, surface, ui
 
 
 def register():
     props.register()
     ops.register()
     shape_edit.register()
+    draw_cut.register()
     ui.register()
 
 
 def unregister():
     ui.unregister()
+    draw_cut.unregister()
     shape_edit.unregister()
     ops.unregister()
     props.unregister()

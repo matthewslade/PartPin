@@ -1387,6 +1387,227 @@ def scenario_unusable_line_reports(core):
     check("model is left in one piece", len(parts) == 1, f"got {len(parts)}")
 
 
+def hand_stroke(surface_mod, model, x=2.0, count=90, wobble=0.06, gap=0):
+    """A stroke as drawing produces one: closely spaced ray-cast hits on the
+    surface, slightly shaky, optionally with a stretch missing where the user
+    let go to orbit.
+
+    Each point is a ray fired at the model from outside, which is exactly
+    what a click in the viewport does — not a nearest-point projection,
+    which can land on whatever happens to be closest.
+    """
+    obj = surface_mod.evaluated(model)
+    inverse = obj.matrix_world.inverted()
+    points = []
+    for i in range(count):
+        if gap and count // 3 <= i < count // 3 + gap:
+            continue  # the pointer was off the model / orbiting
+        angle = 2.0 * math.pi * i / count
+        along = x + wobble * math.sin(angle * 3.0)   # a shaky hand
+        direction = Vector((0.0, -math.cos(angle), -math.sin(angle)))
+        origin = Vector((along, -direction.y * 5.0, -direction.z * 5.0))
+        hit, location, _n, _i = obj.ray_cast(inverse @ origin,
+                                             inverse.to_3x3() @ direction)
+        if hit:
+            points.append(obj.matrix_world @ location)
+    return points
+
+
+def scenario_draw_cut(core):
+    """Drawing the perimeter onto the model and cutting along it."""
+    print("Scenario: draw the cut perimeter on the model")
+    reset_scene()
+    from part_pin import surface
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    before = volume(model)
+
+    stroke = hand_stroke(surface, model)
+    check("stroke has many points along the surface", len(stroke) > 60,
+          f"{len(stroke)} points")
+    # Ray-cast hit positions land a whisker off the surface (~3e-5 on a
+    # model six units long), which is what drawing actually produces.
+    check("every stroke point is on the model",
+          max(surface_distance(model, p) for p in stroke) < 1e-3,
+          f"{max(surface_distance(model, p) for p in stroke):.2e}")
+
+    loop = surface.stroke_to_loop(model, stroke, per_loop=16)
+    check("stroke reduces to draggable control points", len(loop) == 16,
+          f"got {len(loop)}")
+    check("control points sit on the model",
+          max(surface_distance(model, p) for p in loop) < 1e-3,
+          f"{max(surface_distance(model, p) for p in loop):.2e}")
+    spacing = [(loop[(i + 1) % len(loop)] - loop[i]).length
+               for i in range(len(loop))]
+    # Spacing is evened out along the stroke, then each point is pulled onto
+    # the faceted surface, which shifts it a little.
+    check("control points are evenly spread",
+          max(spacing) < min(spacing) * 2.5,
+          f"{min(spacing):.3f}..{max(spacing):.3f}")
+
+    cut, error = surface.cut_from_stroke(bpy.context, model, stroke,
+                                        per_loop=16)
+    check("a cut is created from the stroke", cut is not None, str(error))
+    if cut is None:
+        return
+    check("it is an editable surface cut", cut.pp_cut_kind == 'SURFACE')
+    check("it is localized to the drawn perimeter", cut.pp_local)
+    check("it is listed as a cut", cut in core.scene_cuts(bpy.context.scene))
+    check("its plane follows the drawn loop",
+          abs((cut.matrix_world.to_quaternion()
+               @ Vector((0.0, 0.0, 1.0))).x) > 0.95,
+          "expected to face along the limb")
+
+    failures = []
+    parts, _applied, _warns = core.create_parts(
+        bpy.context, model, [cut], keep_original=True, failures=failures)
+    check("the drawn cut separates the model", len(parts) == 2,
+          f"got {len(parts)}: {failures}")
+    for p in parts:
+        check(f"part closed: {p.name}", is_closed(core, p))
+    if len(parts) != 2:
+        return
+    check("volume is conserved",
+          abs(sum(volume(p) for p in parts) - before) < before * 0.01,
+          f"{sum(volume(p) for p in parts):.3f} vs {before:.3f}")
+    seam = min(core.world_bbox(p)[1].x for p in parts)
+    check("the cut runs where it was drawn", abs(seam - 2.0) < 0.25,
+          f"seam at x {seam:.2f}, drawn at 2.0")
+
+
+def scenario_draw_cut_in_pieces(core):
+    """Drawing in several stretches — let go, orbit, carry on — must still
+    close into one perimeter."""
+    print("Scenario: perimeter drawn in stretches with a gap")
+    reset_scene()
+    from part_pin import surface
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+
+    stroke = hand_stroke(surface, model, gap=12)
+    loop = surface.stroke_to_loop(model, stroke, per_loop=18)
+    check("the gap is bridged into a closed ring", len(loop) == 18,
+          f"got {len(loop)}")
+    longest = max((loop[(i + 1) % len(loop)] - loop[i]).length
+                  for i in range(len(loop)))
+    check("no wild jump across the gap", longest < 0.6,
+          f"longest span {longest:.3f}")
+
+    cut, error = surface.cut_from_stroke(bpy.context, model, stroke,
+                                        per_loop=18)
+    check("a cut is still created", cut is not None, str(error))
+    if cut is None:
+        return
+    failures = []
+    parts, _applied, _warns = core.create_parts(
+        bpy.context, model, [cut], keep_original=True, failures=failures)
+    check("it separates the model", len(parts) == 2,
+          f"got {len(parts)}: {failures}")
+
+
+def scenario_draw_then_adjust(core):
+    """A drawn cut must be adjustable exactly like any other: the on-surface
+    editor works on it, and the cut follows the moved point."""
+    print("Scenario: adjust a drawn cut, then cut")
+    reset_scene()
+    from part_pin import shape_edit, surface
+    import types
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+
+    cut, _error = surface.cut_from_stroke(
+        bpy.context, model, hand_stroke(surface, model), per_loop=16)
+    bpy.context.view_layer.objects.active = cut
+
+    # The editor accepts it without re-deriving anything.
+    same, error = surface.convert_to_surface(bpy.context, cut, model)
+    check("the editor takes the drawn cut as-is", same is cut, str(error))
+
+    cls = shape_edit.PARTPIN_OT_edit_cut_surface
+    op = types.SimpleNamespace()
+    for name in ('_rebuild_cache',):
+        setattr(op, name, getattr(cls, name).__get__(op))
+    op.cut, op.target = cut, model
+    op.hover, op.dragging, op.moved, op._cache = -1, -1, False, None
+    op.report = lambda *a, **k: None
+    op._rebuild_cache()
+    check("the drawn line draws as one loop",
+          len(op._cache['polylines']) == 1,
+          f"{len(op._cache['polylines'])} loops")
+
+    # Nudge one point along the limb, as dragging it would. Away from the
+    # head, so it stays on the surface — dragging in the viewport ray-casts
+    # onto visible surface and cannot bury a point inside the model.
+    point = cut.pp_points[0]
+    world = cut.matrix_world @ Vector(point.co)
+    moved = surface.project_to_surface(model, world + Vector((-0.25, 0, 0)))
+    check("the nudged point is on the model surface",
+          surface_distance(model, moved) < 1e-3,
+          f"{surface_distance(model, moved):.2e}")
+    point.co = cut.matrix_world.inverted() @ moved
+    surface.refit_frame(cut)
+    surface.build_display_mesh(cut, model)
+
+    failures = []
+    parts, _applied, _warns = core.create_parts(
+        bpy.context, model, [cut], keep_original=True, failures=failures)
+    check("the adjusted drawn cut still separates", len(parts) == 2,
+          f"got {len(parts)}: {failures}")
+    if len(parts) != 2:
+        return
+    for p in parts:
+        check(f"part closed: {p.name}", is_closed(core, p))
+    worst = min(surface_distance(p, moved) for p in parts)
+    check("the seam passes through the nudged point", worst < 0.08,
+          f"nearest part surface is {worst:.4f} away")
+
+
+def scenario_draw_cut_rejections(core):
+    print("Scenario: strokes that cannot become a cut say why")
+    reset_scene()
+    from part_pin import surface
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+
+    cut, error = surface.cut_from_stroke(
+        bpy.context, model,
+        [Vector((2.0, 0.4, 0.0)), Vector((2.0, 0.0, 0.4))], per_loop=16)
+    check("a two-point scribble is refused", cut is None and error,
+          str(error))
+    check("the reason mentions the stroke being too short",
+          error and "too short" in error, str(error))
+
+    # A stroke that runs along the limb instead of round it encloses nothing.
+    along = [surface.project_to_surface(model, Vector((x, 0.0, 0.45)))
+             for x in [-2.0 + 0.1 * i for i in range(40)]]
+    along += list(reversed(along))
+    cut, error = surface.cut_from_stroke(bpy.context, model, along,
+                                        per_loop=16)
+    check("a stroke that doubles back is refused", cut is None, str(error))
+    check("the reason is actionable", error and ("enclose" in error
+                                                or "crosses itself" in error),
+          str(error))
+
+
+def scenario_draw_operator_registered(core):
+    print("Scenario: drawing operator wiring")
+    reset_scene()
+    from part_pin import draw_cut
+    s = bpy.context.scene.part_pin
+    check("partpin.draw_cut_line exists",
+          hasattr(bpy.ops.partpin, "draw_cut_line"))
+    check("it will not run without a model",
+          not draw_cut.PARTPIN_OT_draw_cut_line.poll(bpy.context))
+    s.target = make_limb(core)
+    check("it defaults to going straight into adjustment",
+          draw_cut.PARTPIN_OT_draw_cut_line.__annotations__['then_edit']
+          .keywords.get('default') is True)
+
+
 def scenario_modal_helpers(core):
     """Drive the modal operator's logic directly (everything but the GPU)."""
     print("Scenario: surface-edit modal helpers")
@@ -1500,6 +1721,11 @@ def main():
     scenario_overhang_outside_line_survives(core)
     scenario_check_operator(core)
     scenario_unusable_line_reports(core)
+    scenario_draw_cut(core)
+    scenario_draw_cut_in_pieces(core)
+    scenario_draw_then_adjust(core)
+    scenario_draw_cut_rejections(core)
+    scenario_draw_operator_registered(core)
     scenario_modal_helpers(core)
     scenario_operators_registered(core)
     scenario_export(core)  # runs easy mode internally, then exports
