@@ -137,10 +137,11 @@ class PartPinSettings(bpy.types.PropertyGroup):
         max=96,
     )
     surface_resolution: IntProperty(
-        name="Surface Detail",
+        name="Cut Detail",
         description=(
-            "Grid resolution of a reshaped cut surface. Higher follows the "
-            "dragged points more closely but cuts more slowly"
+            "How finely the cut surface is built. Higher follows the line more "
+            "closely; lower is steadier on an awkward line, where a finely "
+            "built surface is likelier to fold onto itself"
         ),
         default=48,
         min=8,
@@ -276,16 +277,21 @@ def register():
         ),
         default=True,
     )
-    bpy.types.Object.pp_margin = FloatProperty(
-        name="Edge Margin",
+    bpy.types.Object.pp_main_loop = IntProperty(
+        name="Main Cut Line",
+        description=("Which cut line sets this cut's plane — the last one "
+                     "edited. -1 picks the longest"),
+        default=-1,
+        options={'HIDDEN'},
+    )
+    bpy.types.Object.pp_local = BoolProperty(
+        name="Cut Inside Line Only",
         description=(
-            "How far past the cut line the cut reaches, as a fraction of "
-            "the line's size. Just enough to break through the surface — "
-            "raise it if the cut fails to separate the region"
+            "Cut only the region ring-fenced by this cut's line, leaving "
+            "the rest of the model whole. Turn off to let the cut surface "
+            "carry on and split everything it meets"
         ),
-        default=0.05,
-        min=0.001,
-        max=0.5,
+        default=True,
     )
     bpy.types.Object.pp_undercut = FloatProperty(
         name="Undercut",
@@ -322,6 +328,6 @@ def unregister():
     for attr in (
         "pp_role", "pp_cut_kind", "pp_index", "pp_enabled",
         "pp_shape", "pp_clearance", "pp_pin_flip",
-        "pp_local", "pp_margin", "pp_main_loop", "pp_undercut",
+        "pp_local", "pp_main_loop", "pp_undercut",
     ):
         delattr(bpy.types.Object, attr)

@@ -2014,6 +2014,88 @@ def scenario_cut_object_shows_the_lid(core):
           f"{max(hi - lo):.2f} vs line span {line_span:.2f}")
 
 
+def scenario_inspection_marks(core):
+    """Everything measurably wrong with a cut is reported as places on the
+    model, and a cut with nothing wrong reports nothing."""
+    print("Scenario: inspecting a cut for trouble")
+    from part_pin import surface
+
+    for label, maker, kwargs in (("limb", make_limb, {}),
+                                 ("cube", make_cube_model, {})):
+        reset_scene()
+        s = bpy.context.scene.part_pin
+        model = maker(core, **kwargs)
+        s.target = model
+        if maker is make_cube_model:
+            cut, _error = surface.cut_from_stroke(
+                bpy.context, model, waist_stroke(surface, model), per_loop=16)
+        else:
+            cut = collar_cut(core, surface, model)
+        found = surface.inspect_cut(cut, model)
+        check(f"a cut that works reports nothing wrong ({label})",
+              not any(found.values()),
+              ", ".join(f"{k}={len(v)}" for k, v in found.items() if v))
+        pieces, _j, _h = surface.trial_cut(cut, model)
+        check(f"and it does cut ({label})", pieces == 2, f"{pieces} pieces")
+
+    # A line that cannot be cut is marked, and says which problem it is.
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_limb_with_fin(core)
+    s.target = model
+    cut = collar_cut(core, surface, model)
+    found = surface.inspect_cut(cut, model)
+    check("a cut that will not work is marked", any(found.values()),
+          ", ".join(f"{k}={len(v)}" for k, v in found.items()))
+    for kind, places in found.items():
+        if places:
+            check(f"{kind} has advice to give", kind in surface.TROUBLE,
+                  str(sorted(surface.TROUBLE)))
+            check(f"{kind} marks are on the model, not scattered",
+                  max(surface_gap_to(model, p) for p in places)
+                  < core.bbox_diagonal(model) * 0.2,
+                  f"furthest {max(surface_gap_to(model, p) for p in places):.3f}")
+
+    # A line dragged off the model is called out as such.
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    cut = collar_cut(core, surface, model)
+    for point in cut.pp_points:
+        world = cut.matrix_world @ Vector(point.co)
+        point.co = cut.matrix_world.inverted() @ (world * 1.6)
+    found = surface.inspect_cut(cut, model)
+    check("a line off the model is marked as adrift",
+          len(found[surface.ADRIFT]) > 0,
+          ", ".join(f"{k}={len(v)}" for k, v in found.items()))
+
+
+def surface_gap_to(model, point):
+    from part_pin import surface
+    return surface.surface_gap(model, point)
+
+
+def scenario_settings_are_all_used(core):
+    """Every setting the panel shows must still do something — a dial that
+    changes nothing is worse than no dial."""
+    print("Scenario: no leftover settings")
+    import inspect as inspect_module
+    from part_pin import core as core_module
+    from part_pin import draw_cut, ops, shape_edit, surface, ui
+
+    panel_source = inspect_module.getsource(ui)
+    code = "".join(inspect_module.getsource(module) for module in
+                   (core_module, surface, ops, shape_edit, draw_cut))
+
+    import re
+    shown = set(re.findall(r'\.prop\((?:s|cut), "(\w+)"', panel_source))
+    check("the panel shows some settings", len(shown) > 5, str(sorted(shown)))
+    unused = [name for name in shown
+              if code.count(name) == 0]
+    check("every setting the panel shows is used", not unused, str(unused))
+
+
 def scenario_operator_wiring_audit(core):
     """Every self.helper() an operator calls, and every self.thing it reads,
     must exist.
@@ -2214,6 +2296,8 @@ def main():
     scenario_line_hugs_surface(core)
     scenario_cap_preview(core)
     scenario_cut_object_shows_the_lid(core)
+    scenario_inspection_marks(core)
+    scenario_settings_are_all_used(core)
     scenario_operator_wiring_audit(core)
     scenario_modal_helpers(core)
     scenario_operators_registered(core)

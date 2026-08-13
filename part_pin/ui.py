@@ -118,6 +118,9 @@ class PARTPIN_PT_shape(PARTPIN_PT_base, bpy.types.Panel):
             box.prop(cut, "pp_falloff")
             box.prop(s, "surface_resolution")
             if cut.pp_local:
+                box.label(text="Marks show what would stop the cut",
+                          icon='INFO')
+            if cut.pp_local:
                 box.operator("partpin.check_cut_line", text="Try This Cut",
                              icon='ZOOM_ALL')
             row = box.row(align=True)

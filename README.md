@@ -1,251 +1,189 @@
 # PartPin — split models into printable parts
 
-A free Blender add-on that splits a model into 3D-printable parts,
-adds matching **pin / socket connectors** with printable clearance,
-and exports the parts ready for slicing.
+A free Blender add-on for cutting a model into 3D-printable parts. You draw
+the perimeter of the cut straight onto the model, adjust it, and cut. Matching
+**pin / socket connectors** hold the parts together, and the finished parts
+export ready for slicing.
 
-Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
-**closed, manifold mesh** (like every boolean-based cutter).
+Works in **Blender 4.2+** on Windows, macOS and Linux. Needs a **closed,
+manifold mesh** (as does every boolean-based cutter).
 
 ## Install
 
 1. Download `part_pin-<version>.zip` from the
-   [Releases page](https://github.com/matthewslade/PartPin/releases),
-   or build it from source:
+   [Releases page](https://github.com/matthewslade/PartPin/releases), or build
+   it yourself:
 
    ```sh
    ./build.sh   # writes dist/part_pin-<version>.zip
    ```
 
-2. In Blender: **Edit ▸ Preferences ▸ Add-ons ▸ (v) dropdown ▸ Install from
-   Disk…** and pick the zip. Enable **PartPin** if it isn't already.
+2. In Blender: **Edit ▸ Preferences ▸ Add-ons ▸ ⌄ ▸ Install from Disk…** and
+   pick the zip. **Restart Blender** if you are updating — Python keeps the old
+   copy loaded otherwise.
 
-3. The panel lives in the 3D Viewport sidebar: press **N ▸ PartPin** tab.
+3. The panel is in the 3D Viewport sidebar: press **N ▸ PartPin**.
 
-## Workflow (Draft mode — non-destructive)
+## The short version
 
-1. **Pick the model** in the PartPin panel, optionally hit **Check Mesh**
-   (it must be closed/manifold — repair with Remesh or the bundled
-   3D-Print Toolbox add-on if not).
-2. **Draw the cut on the model** — hit **Draw Cut on Model**, then hold
-   left mouse and draw the perimeter straight onto the surface. Every
-   position is ray-cast onto the model, so the line goes exactly where you
-   put it.
+**Pick the model → Draw Cut on Model → adjust the line → press T → Create
+Parts → Export.**
 
-   | Action | Result |
-   | --- | --- |
-   | Hold left mouse and draw | Lay the line onto the model's surface |
-   | Let go, orbit, draw again | Carry the perimeter round the far side — the line joins up across the model, following its faces |
-   | Close at the green dot | Finish the loop and go straight to adjusting it |
-   | Enter | Close the loop from wherever you are |
-   | Backspace | Undo the last stretch |
-   | Esc | Cancel |
+## 1. Pick the model
 
-   Corners are kept: a point lands on each corner of what you draw, and the
-   straight runs between get evenly spaced points. So a line drawn round a
-   box keeps its corners rather than being rounded off, which would cut
-   across them.
+Set **Model** in the panel. **Check Mesh** confirms it is closed and manifold;
+if it is not, repair it first (Mesh ▸ Clean Up, Remesh, or the 3D-Print
+Toolbox add-on that ships with Blender).
 
-   The green dot marks where you started and turns yellow when you are
-   close enough to close on it. When the loop closes it becomes an
-   ordinary editable cut and drops you straight into point editing
-   (step 3), so you can nudge it before cutting.
+## 2. Draw the cut on the model
 
-   **Or start from a shape** instead, if that suits the model better:
-   - **Straight** — a wire cut plane through the 3D cursor (or model
-     centre). Move / rotate / scale it like any object; pick the axis in
-     the dropdown next to the button.
-   - **Draw Across Model** — orient the view, draw one stroke across the
-     model, and it becomes a cut extruded along your view direction.
-   - Cuts are listed in the panel — click to select, tick to
-     enable/disable, ✕ to delete. Nothing touches the model until you
-     confirm.
-3. **Fine-tune the line on the model** — you land here automatically after
-   drawing, or hit **Edit Cut on Surface** for a cut grown from a shape.
-   The cut object itself disappears and you get the line where the cut
-   meets your model, with draggable points sitting on its surface:
+Hit **Draw Cut on Model** and draw the perimeter of the cut onto the surface.
+Every position is ray-cast onto the model, so the line goes exactly where you
+put it.
 
-   | Action | Result |
-   | --- | --- |
-   | Drag a point | It slides along the model's surface; the shaded surface spanning the line follows it |
-   | Ctrl+Click | Add a point on the surface |
-   | X | Remove the point under the cursor |
-   | Alt+X | Remove a whole cut line (that region stops being cut) |
-   | C | Re-check the line and mark what would stop it cutting |
-   | Ctrl+Wheel | Widen / tighten the falloff (how far each point's pull spreads) |
-   | Enter | Confirm |
-   | Esc | Revert |
+| Action | Result |
+| --- | --- |
+| Hold left mouse and draw | Lay the line onto the model |
+| Let go, orbit, draw again | Carry on round the far side — the line joins up across the model, following its faces |
+| Close at the green dot | Finish the loop and go straight to adjusting it |
+| Enter | Close the loop from wherever you are |
+| Backspace | Undo the last stretch |
+| Esc | Cancel |
 
-   Middle-mouse and the scroll wheel still orbit and zoom, so you can
-   spin the model around while editing.
+The green dot marks where you started, and turns yellow when you are close
+enough to close on it. Corners are kept: a point lands on each corner you
+draw, so a line round a boxy shape keeps its corners instead of being rounded
+off.
 
-   The line is drawn on the model's surface wherever it runs, and lifted a
-   hair clear of it so the surface cannot swallow it. *Line Lift* sets how
-   far — raise it if the line still disappears into the model on your
-   sculpt, lower it if it looks detached. It moves what is drawn only; the
-   cut itself stays on the surface.
+**Or start from a shape** if that suits the model better — a **Straight** cut
+plane you move and rotate like any object, or **Draw Across Model** for a
+single stroke that cuts along your view direction. Either can then be edited on
+the surface exactly like a drawn line.
 
-   Because a plane is defined by only three points, dragging points
-   turns the cut into a **free-form cut surface**: a smooth surface that
-   passes exactly through every point you place. It is stored as a
-   height field over the original plane, which means it can never fold
-   back on itself — the cut always yields clean, closed parts.
-   **Flatten** returns a reshaped cut to a plane, and **Snap
-   Connectors** re-seats existing pins onto the new surface.
+## 3. Adjust the line on the model
 
-   **The cut stops at the line** (*Cut Inside Line Only*, on by default).
-   Only the region ring-fenced by the cut line is severed — the cut does
-   not carry on as an endless plane through the rest of the model. Draw a
-   line round a head, an arm or a knob and only that comes off; anything
-   else the old plane happened to pass through is left whole. The piece
-   may be far wider than the line that fences it (a mushroom head on a
-   thin stalk comes off intact), because the region is found by following
-   the model, not by clipping to the line's outline.
+Closing a drawn loop drops you straight in here; otherwise hit **Edit Cut on
+Surface**. The cut object disappears and you get the line where the cut meets
+your model, with draggable points on it, and the **shaded surface that will do
+the cutting** drawn through the model.
 
-   Drag the line as far as you like — right round a limb, even to a
-   plane at right angles to where the cut started. The cut's plane
-   re-fits itself to the line you are editing, so the region it fences
-   is always one it can actually cut.
+| Action | Result |
+| --- | --- |
+| Drag a point | It slides along the surface; the line and the cut surface follow it |
+| Ctrl+Click | Add a point |
+| X | Remove the point under the cursor |
+| Alt+X | Remove a whole cut line |
+| Ctrl+Wheel | Widen or tighten the falloff — how far each point's pull spreads |
+| **T** | **Try the cut** on a copy and say whether it separates |
+| Enter | Confirm |
+| Esc | Revert |
 
-   The shaded surface spanning your line **is the cut** — the same lid that
-   does the cutting, drawn through the model so you can see where it lands,
-   and rebuilt as you drag. What you see is what comes away.
+Middle-mouse and the wheel still orbit and zoom, so you can spin the model
+around while editing.
 
-   **How the cut is made: from the perimeter, inwards.** Your line is
-   spanned by a lid — a surface drawn inwards from the line to its middle,
-   lying on the cut's own smooth surface — and that lid, thickened to a
-   hair, is what cuts. So the cut is decided by the perimeter and nothing
-   else: no plane to flatten the line onto, no grid deciding which side
-   counts, nothing reaching sideways into the model to break through the
-   surface. Draw round an arm at the armpit and the arm comes away, with
-   the body untouched, for about 0.01% of the model's volume at the seam.
+### The warnings
 
-   Marks from a cut that would not separate are shown as soon as you open
-   the editor, so you do not have to know to ask for them.
+After every drag, the cut is measured against your model and anything wrong
+with it is marked where it is wrong. A cut with nothing wrong is marked nothing
+at all.
 
-   **Will this cut work? Press T, or hit Try This Cut.** The cut is made
-   on a copy, and you are told whether it separates. Nothing is marked when
-   it does — parts of a cut surface often pass outside the model without
-   doing any harm, and pointing at those on a cut that works is only noise.
+| Mark | Meaning | What to do |
+| --- | --- | --- |
+| **Red** | The cut surface folds onto itself there. The solver cannot use a folded surface and returns nothing, which is the commonest reason a cut does nothing at all | Spread those points apart, or take the line a shorter way round |
+| **Amber** | The cut cannot break out of the model there, so material wraps round it and holds the piece on | Move the line to where the piece is clear of what holds it, or raise *Undercut* |
+| **Yellow** | The line has come off the model there | Drag those points back onto it |
+| **Violet** | The cut runs through open space well inside the line, so the line encloses more than solid material | Bring the line in closer round the piece |
 
-   When it does not separate, the reasons are marked on the model:
+Press **T** at any point for a straight answer: *"This cut separates into 2
+parts"*, or what is stopping it.
 
-   | Mark | Meaning | What to do |
-   | --- | --- | --- |
-   | Red | Material carries on past the line there, joining the two sides around the cut | Move the line past that material, or raise *Undercut* to reach through it |
-   | Violet | The cut surface leaves the model well inside the line, so the line encloses space as well as solid material | Bring the line in closer where it rides over a raised edge |
+## 4. Connectors
 
-   A cut picks up a line on **every** feature it crosses, and each one
-   cuts. Hover a line and press **Alt+X** to drop the ones you don't
-   want. Lines that end up in a different plane from the one you are
-   editing cannot be cut alongside it: those are skipped and reported,
-   so use a separate cut for each region facing a different way. Untick
-   *Cut Inside Line Only* for the old behaviour of splitting everything
-   the surface meets.
+With a cut active, **Add Connectors** places pins along it. They are ordinary
+objects: move, rotate, scale, duplicate (Shift+D) or delete them.
 
-4. **Add connectors** — with a cut active, **Add Connectors** places
-   `Count` pins spaced along the cut cross-section. They are ordinary
-   draft objects: move, rotate, scale, duplicate (Shift+D) or delete
-   them. Shapes: **Cylinder**, **Tapered** (self-centering, the default),
-   **Box** (anti-rotation), or **Custom Mesh** (apply scale on your
-   custom object first — its mesh is used as-is).
-   - **Clearance** is how much bigger the socket is than the pin.
-     FDM printers typically want 0.1–0.3 mm — print a test first.
-   - **Flip Pin** swaps which side gets the pin vs. the socket
-     (flipped connectors turn blue — enable *Viewport Shading ▸ Color:
-     Object* to see it).
-   - **Auto Size** derives sensible pin dimensions from the model; it
-     also happens automatically the first time you add connectors.
-5. **Create Parts** — applies every enabled cut, unions the pins into
-   their parts and subtracts clearance-fattened sockets from the mating
-   parts. Final parts land in a new `<Model> Parts` collection; the
-   original is kept hidden (untick *Keep Original* to discard it).
-   *Part Gap* moves the finished parts apart so you can inspect the
-   seams.
-6. **Export** — STL, OBJ or FBX; one file per part or a single file.
-   If you model true-to-scale in meters, set *Scale* to 1000 so slicers
-   (which read STL units as mm) get the size right. If you already work
-   "1 unit = 1 mm", leave it at 1.
+- **Shape** — Cylinder, Tapered (self-centering, the default), Box
+  (anti-rotation), or **Custom Mesh** (apply scale on your object first; its
+  mesh is used as-is).
+- **Clearance** — how much bigger the socket is than the pin. FDM printers
+  usually want 0.1–0.3 mm. Print one and check before committing.
+- **Flip Pin** — swap which part gets the pin and which the socket. Flipped
+  pins turn blue (enable *Viewport Shading ▸ Color: Object* to see it).
+- **Auto Size** — derive pin sizes from the model; it also happens by itself
+  the first time you add connectors.
+- **Snap Connectors** re-seats pins after you reshape a cut.
 
-## Easy mode
+## 5. Create Parts, and export
 
-For simple models: pick the axis, then **Cut at Center** (or **At
-Cursor**). One click does cut → auto connectors → final parts, no draft
-step.
+**Create Parts** applies every enabled cut, unions the pins into their parts
+and subtracts clearance-fattened sockets from the mating parts. The parts land
+in a new `<Model> Parts` collection; the original is kept hidden unless you
+untick *Keep Original*. *Part Gap* moves the finished parts apart so you can
+look at the seams.
 
-## Features
+**Export** writes STL, OBJ or FBX, one file per part or a single file. If you
+model true-to-scale in metres, set *Scale* to 1000 so slicers — which read STL
+units as millimetres — get the size right. If you already work at 1 unit =
+1 mm, leave it at 1.
 
-- Draw the cut perimeter directly onto the model, in as many stretches as
-  you like, then adjust it point by point
-- Draft mode: multiple editable cuts — enable, disable or remove them
-  before anything is applied
-- Easy mode: one-click cut for simple models
-- Straight cuts with a movable / rotatable / scalable plane
-- Drawn curved cuts (freehand stroke in the viewport)
-- On-surface fine-tuning: drag the cut line's points along the model to
-  reshape the cut, with add/remove points and adjustable falloff
-- Trouble spots marked on the cut line when a cut cannot separate
-- Only material inside the line is cut: the rest of the model is left
-  whole, however far the cut's plane would carry on
-- Undercut for recessed pieces: reach a measured, bounded distance into
-  what holds a piece on, with a one-click Fix that works out how far
-- Localized cuts: only the region ring-fenced by the cut line is severed,
-  leaving the rest of the model whole
-- Built-in connector shapes plus custom connector meshes
-- Connector position / rotation / scale editing and pin-side flip
-- Adjustable pin/socket clearance, per connector
-- Final parts land in a new collection; the original model stays untouched
-- STL / OBJ / FBX export, one file per part or a single file
+**Easy mode**, at the bottom of the panel, does cut → connectors → parts in one
+click for simple models: pick an axis, then **Cut at Center** or **At Cursor**.
+
+## What the cut actually does
+
+Your perimeter is spanned by a lid — a surface drawn inwards from the line —
+and that lid, thickened to a hair, is what cuts. So **the perimeter decides
+everything**: there is no plane to flatten your line onto, and nothing reaching
+sideways into the model.
+
+Only the material inside the line is cut. Draw round an arm at the armpit and
+the arm comes away with the body left whole, even though the cut's plane would
+carry on through it. About 0.01% of the model's volume is spent at the seam,
+far below what a printer resolves.
+
+The lid's rim steps out through the model's surface to break the piece free —
+following the surface's own outward normal, so at a crease it steps out of the
+crease rather than into the body. *Undercut* lets it reach further, for a piece
+that starts buried inside another part of the model.
+
+## Settings worth knowing
+
+| Setting | What it does |
+| --- | --- |
+| **Points** | How many draggable points a new line gets. Corners always get one, so the count is a guide rather than a rule |
+| **Cut Detail** | How finely the cut surface is built. Higher follows the line more closely; lower is steadier on an awkward line, where a fine surface is likelier to fold |
+| **Line Lift** | How far above the surface the line is drawn, so the surface cannot swallow it. Drawing only — the cut does not move |
+| **Undercut** | How far the cut may reach into the model around the line, to free a recessed piece. 0 by default |
+| **Cut Inside Line Only** | On by default. Off lets the cut surface carry on and split everything it meets |
 
 ## Testing
 
-Headless smoke test (no UI needed) — runs cuts, connectors, surface
-reshaping, easy mode, validation and all three exporters, and checks
-every part comes out closed and manifold:
+The whole geometry side runs headless — no UI needed:
 
 ```sh
 blender --background --python-exit-code 1 --python tests/smoke_test.py
 ```
 
-On macOS the binary is usually
-`/Applications/Blender.app/Contents/MacOS/Blender`.
+45 scenarios covering cuts, connectors, drawing, the warnings and all three
+exporters, checking that every part comes out closed and manifold. On macOS the
+binary is usually `/Applications/Blender.app/Contents/MacOS/Blender`.
 
-## Notes & limitations
+## Limits worth knowing
 
-- Boolean cutting is exact but not instant: multi-million-poly meshes
-  take a while. Cut before subdividing when you can.
-- The cut surface can come out self-crossing on an awkward line, and the
-  exact solver then returns nothing rather than a cut. That is reported as
-  such — nudging a point or lowering *Surface Detail* usually clears it —
-  but it remains the roughest edge in the tool.
-- The highlight's edge follows the line to within about a sample's width,
-  so on a sharply cornered line it can appear to clip a corner slightly.
-- Curved cuts assume one stroke drawn across the model (or a closed
-  loop). Strongly self-intersecting scribbles won't produce a valid cut
-  volume.
-- On-surface editing needs the cut line to stay a simple shape when
-  viewed down the cut's normal. A drawn cut that doubles back on itself
-  that severely is refused with a message rather than cut badly — edit
-  its stroke instead.
-- Dragged points follow the visible surface, so to move one round the
-  back of the model, orbit the view first.
-- Surface cuts are graded by *Surface Detail*: raise it if a reshaped cut
-  looks faceted, lower it if cutting gets slow.
-- A localized cut removes a hair of material at the seam (0.01% of the
-  model — 0.02 mm on a 200 mm print), so the two faces mate with a gap far
-  below what a printer resolves.
-- A localized cut needs its line to close around a region. If the line
-  runs off the model, doubles back so it fences nothing, or *Edge Margin*
-  is too small to break through the surface, the cut says so instead of
-  silently doing nothing.
-- A cut takes a bite of about one grid cell just outside the line where the
-  piece is welded to the model — there is nowhere else to break out. Raise
-  *Surface Detail* to make that bite smaller.
-- One cut has one plane. Lines facing more than about 45° away from the
-  line you last edited are skipped with a warning — give each such region
-  its own cut.
+- **The cut surface can fold onto itself** on an awkward line, and the exact
+  solver then returns nothing rather than a cut. It is marked in red where that
+  happens, and lowering *Cut Detail* or spreading the points usually clears it.
+  This is the roughest edge in the tool.
+- A cut only separates a piece attached **inside** the line. If something
+  crosses the line — a strap, a fin, a spike — the piece cannot come away
+  without cutting that too, and the cut says so rather than doing it.
+- Boolean cutting is exact but not instant: multi-million-poly meshes take a
+  while. Cut before subdividing where you can.
+- One cut has one plane. Lines facing more than about 45° away from the one you
+  last edited are skipped with a warning — give each such region its own cut.
+- Drawing and dragging follow the visible surface, so orbit first to reach the
+  far side.
 - Modifiers on the model are baked into the parts.
-- Work on one model at a time; *Clear All Cuts* resets the drafts.
 
 ## License
 

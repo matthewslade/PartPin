@@ -912,6 +912,131 @@ def cap_sheet(cut, target, usable, ring=96, relax=18, cuts=2,
 JOIN_HINTS = {}
 
 
+# What an inspection can find wrong with a cut, and what to do about each.
+FOLDED = 'FOLDED'        # the cut surface doubles back on itself
+BURIED = 'BURIED'        # its edge is still inside the model
+ADRIFT = 'ADRIFT'        # the line has left the model's surface
+HOLLOW = 'HOLLOW'        # the cut passes outside the model well inside its line
+
+TROUBLE = {
+    FOLDED: ("the cut surface folds onto itself — spread these points apart, "
+             "or take the line a shorter way round"),
+    BURIED: ("the cut cannot break out of the model here — move the line to "
+             "where the piece is clear, or raise Undercut"),
+    ADRIFT: "the line has come off the model here — drag these points back on",
+    HOLLOW: ("the cut runs through open space here — the line encloses more "
+             "than solid material, so bring it in closer"),
+}
+
+
+def inspect_cut(cut, target, ring=96):
+    """Everything measurably wrong with a cut, as places on the model.
+
+    Read-only: it builds the cut surface the cutter would use and measures it
+    against the model, so what it reports is what will happen rather than a
+    guess at it. Returns {kind: [world positions]}.
+    """
+    found = {FOLDED: [], BURIED: [], ADRIFT: [], HOLLOW: []}
+    usable, problem, _warning = loop_quality(cut, min_alignment=0.0)
+    if problem is not None:
+        return found
+
+    matrix = cut.matrix_world
+    diagonal = core.bbox_diagonal(target)
+
+    # The line itself: have the points come off the model? Measured on the
+    # points as stored, not on the drawn line, which is put onto the surface as
+    # it is built and so could never look adrift.
+    for point in cut.pp_points:
+        world = matrix @ Vector(point.co)
+        if surface_gap(target, world) > diagonal * 2e-3:
+            found[ADRIFT].append(world)
+
+    buried = []
+    bm, problem = cap_sheet(cut, target, usable, ring=ring, stuck=buried)
+    if bm is None:
+        return found
+    found[BURIED] = list(buried)
+
+    # The rim, in the order it runs, so segments can be compared with segments.
+    rim = _rim_ring(bm)
+    spacing = (loop_length([v.co for v in rim]) / max(len(rim), 1)) if rim else 0.0
+    pinch = spacing * 0.35
+    for i, vert in enumerate(rim):
+        a1, a2 = vert.co, rim[(i + 1) % len(rim)].co
+        for j in range(i + 2, len(rim)):
+            if i == 0 and j == len(rim) - 1:
+                continue  # the two ends of the ring are neighbours
+            b1, b2 = rim[j].co, rim[(j + 1) % len(rim)].co
+            if _segments_touch(a1, a2, b1, b2, pinch):
+                found[FOLDED].append(matrix @ ((a1 + a2) * 0.5))
+                found[FOLDED].append(matrix @ ((b1 + b2) * 0.5))
+
+    # The middle of the lid: is it running through open space?
+    edge_verts = {v for v in bm.verts if v.is_boundary}
+    for _step in range(2):
+        edge_verts |= {edge.other_vert(v) for v in set(edge_verts)
+                       for edge in v.link_edges}
+    for face in bm.faces:
+        if any(vert in edge_verts for vert in face.verts):
+            continue
+        centre = matrix @ face.calc_center_median()
+        if not core.point_inside(target, centre):
+            found[HOLLOW].append(centre)
+    bm.free()
+
+    return {kind: _thin(places) for kind, places in found.items()}
+
+
+def surface_gap(target, world_point):
+    """How far a point sits from the model's surface."""
+    model = evaluated(target)
+    ok, near, _normal, _index = model.closest_point_on_mesh(
+        model.matrix_world.inverted() @ world_point)
+    if not ok:
+        return float('inf')
+    return ((model.matrix_world @ near) - world_point).length
+
+
+def _rim_ring(bm):
+    """The lid's boundary vertices, in the order they run round it."""
+    start = next((v for v in bm.verts if v.is_boundary), None)
+    if start is None:
+        return []
+    ring, seen, vert = [], set(), start
+    while vert is not None and vert not in seen:
+        seen.add(vert)
+        ring.append(vert)
+        vert = next((edge.other_vert(vert) for edge in vert.link_edges
+                     if edge.is_boundary and edge.other_vert(vert) not in seen),
+                    None)
+    return ring
+
+
+def _segments_touch(a1, a2, b1, b2, tolerance):
+    """Whether two segments come within `tolerance` of each other."""
+    if tolerance <= 0.0:
+        return False
+    # Cheap reject on their bounding boxes first.
+    for axis in range(3):
+        if (min(a1[axis], a2[axis]) - tolerance
+                > max(b1[axis], b2[axis])
+                or min(b1[axis], b2[axis]) - tolerance
+                > max(a1[axis], a2[axis])):
+            return False
+    best = float('inf')
+    for steps in ((a1, a2, b1, b2), (b1, b2, a1, a2)):
+        first, second, other_first, other_second = steps
+        span = second - first
+        length = span.length_squared
+        for point in (other_first, other_second, (other_first
+                                                  + other_second) * 0.5):
+            t = 0.0 if length < 1e-18 else max(
+                0.0, min(1.0, (point - first).dot(span) / length))
+            best = min(best, (first + span * t - point).length)
+    return best < tolerance
+
+
 def find_join_hints(cut, target, ring=96):
     """Where the model would stay joined if this cut were made.
 

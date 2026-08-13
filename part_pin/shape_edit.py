@@ -17,8 +17,18 @@ LINE_COLOR = (1.0, 0.62, 0.16, 1.0)
 LINE_COLOR_HIDDEN = (1.0, 0.62, 0.16, 0.22)
 POINT_COLOR = (0.96, 0.96, 0.96, 1.0)
 
-JOINED_COLOR = (1.0, 0.15, 0.15, 1.0)     # still joined: material wraps round
-HOLE_COLOR = (0.55, 0.4, 1.0, 1.0)        # the cut leaves the model here
+TROUBLE_COLORS = {
+    surface.FOLDED: (1.0, 0.15, 0.15, 1.0),   # red: the cut folds onto itself
+    surface.BURIED: (1.0, 0.60, 0.00, 1.0),   # amber: cannot break out here
+    surface.ADRIFT: (1.0, 0.95, 0.30, 1.0),   # yellow: line off the model
+    surface.HOLLOW: (0.55, 0.40, 1.00, 1.0),  # violet: cut through open space
+}
+TROUBLE_LABELS = {
+    surface.FOLDED: "red = folds onto itself",
+    surface.BURIED: "amber = cannot break out",
+    surface.ADRIFT: "yellow = off the model",
+    surface.HOLLOW: "violet = through open space",
+}
 CAP_COLOR = (1.0, 0.62, 0.16, 0.16)       # the lid that will do the cutting
 CAP_COLOR_EDGE = (1.0, 0.72, 0.30, 0.5)
 POINT_HOVER = (1.0, 0.95, 0.35, 1.0)
@@ -136,18 +146,11 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         self.moved = False
         self._cache = None
         self._cap_tris = []
-        self._joined = []
-        self._holes = []
+        self._trouble = {}
         self._verdict = ""
-        stored = surface.JOIN_HINTS.get(cut.name) or {}
-        self._joined = list(stored.get('joined', ()))
-        self._holes = list(stored.get('holes', ()))
-        if self._joined or self._holes:
-            self._verdict = ("This cut did not separate — red: material "
-                             "carries on past the line; violet: the cut "
-                             "leaves the model. Press T to re-check")
         self._rebuild_cache()
         self._rebuild_cap()
+        self._inspect()
 
         self._handle = bpy.types.SpaceView3D.draw_handler_add(
             self._draw, (context,), 'WINDOW', 'POST_VIEW')
@@ -195,11 +198,30 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
     # Geometry helpers
     # ------------------------------------------------------------------
 
-    def _clear_hints(self):
-        """Forget any marks: the line has moved, so they are out of date."""
-        self._joined = []
-        self._holes = []
+    def _inspect(self, context=None):
+        """Measure the cut against the model and mark whatever is wrong.
+
+        Costs about a thirtieth of a second and never changes anything, so it
+        runs when editing starts and after every drag — the point of it is to
+        show trouble while there is still a hand on the line.
+        """
+        self._trouble = {}
         self._verdict = ""
+        if not self.cut.pp_local:
+            return
+        try:
+            found = surface.inspect_cut(self.cut, self.target)
+        except Exception:
+            return
+        self._trouble = {kind: places for kind, places in found.items()
+                         if places}
+        if self._trouble:
+            self._verdict = "WILL NOT CUT YET: " + "  ".join(
+                TROUBLE_LABELS[kind] for kind in self._trouble)
+        if context is not None:
+            self._update_status(context)
+            if self.area:
+                self.area.tag_redraw()
 
     def _try_cut(self, context):
         """Make the cut on a copy and say whether it separates.
@@ -208,27 +230,27 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         surface often lie outside the model without doing any harm, and
         pointing at those on a cut that works is just noise.
         """
-        self._clear_hints()
         if not self.cut.pp_local:
             self.report({'INFO'}, "This cut is not limited to its line")
             return
         try:
-            pieces, joined, holes = surface.trial_cut(self.cut, self.target)
+            pieces, _joined, _holes = surface.trial_cut(self.cut, self.target)
         except Exception:
             self.report({'WARNING'}, "Could not try the cut")
             return
+        self._inspect()
         if pieces >= 2:
             self._verdict = f"This cut separates into {pieces} parts"
             self.report({'INFO'}, self._verdict)
-        elif (surface.JOIN_HINTS.get(self.cut.name) or {}).get('tangled'):
-            self._verdict = ("The cut surface came out tangled — nudge a point, "
-                             "or lower Surface Detail")
-            self.report({'WARNING'}, self._verdict)
+        elif self._trouble:
+            self.report({'WARNING'}, "This cut would not separate — "
+                        + "; ".join(f"{len(places)} spots where "
+                                    + surface.TROUBLE[kind].split(' — ')[0]
+                                    for kind, places in
+                                    self._trouble.items()))
         else:
-            self._joined, self._holes = joined, holes
-            self._verdict = ("This cut would not separate — marked: red where "
-                             "it stays buried, violet where it leaves the "
-                             "model")
+            self._verdict = ("This cut would not separate, and nothing on the "
+                             "line looks wrong — try nudging a point")
             self.report({'WARNING'}, self._verdict)
         self._update_status(context)
         if self.area:
@@ -456,8 +478,7 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
                     surface.refit_frame(self.cut)
                     self._rebuild_cache()
                     self._rebuild_cap()
-                    self._clear_hints()
-                    self._update_status(context)
+                    self._inspect(context)
                 self.dragging = -1
                 return {'RUNNING_MODAL'}
 
@@ -529,8 +550,12 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
             return
         try:
             _draw_tris(self._cap_tris, CAP_COLOR)
-            _draw_points(self._holes, HOLE_COLOR, 8.0)
-            _draw_points(self._joined, JOINED_COLOR, 11.0)
+            for kind, places in (self._trouble or {}).items():
+                colour = TROUBLE_COLORS.get(kind)
+                if colour:
+                    _draw_points(places, (colour[0], colour[1], colour[2],
+                                          0.3), 16.0)
+                    _draw_points(places, colour, 9.0)
 
             for line in self._cache['polylines']:
                 _draw_lines(line, LINE_COLOR_HIDDEN, 2.0, 'NONE')

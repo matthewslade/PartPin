@@ -711,9 +711,10 @@ def create_parts(context, target, cuts, keep_original=True, part_gap=0.0,
     for cut in cuts:
         localized = surface.is_local(cut)
         if localized:
-            resolution = get_settings(context).surface_resolution
+            # Cut Detail drives how finely the cut surface is built.
+            detail = get_settings(context).surface_resolution
             cutter, problem, note = surface.build_cap_slab(
-                cut, target, scene)
+                cut, target, scene, ring=max(48, min(detail * 2, 240)))
             if note:
                 warnings.append(f"Cut '{cut.name}': {note}")
             if problem is not None:
