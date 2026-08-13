@@ -23,6 +23,8 @@ PROBE_COLORS = {
     surface.PROBE_MARGIN: (1.0, 0.78, 0.0, 1.0),   # amber: needs more reach
     surface.PROBE_STUCK: (0.65, 0.35, 1.0, 1.0),   # violet: line off material
 }
+JOINED_COLOR = (1.0, 0.15, 0.15, 1.0)     # still joined: material wraps round
+HOLE_COLOR = (0.55, 0.4, 1.0, 1.0)        # the cut leaves the model here
 CAP_COLOR = (1.0, 0.62, 0.16, 0.16)       # the lid that will do the cutting
 CAP_COLOR_EDGE = (1.0, 0.72, 0.30, 0.5)
 POINT_HOVER = (1.0, 0.95, 0.35, 1.0)
@@ -140,10 +142,13 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         self.moved = False
         self._cache = None
         self._cap_tris = []
+        self._joined = []
+        self._holes = []
         self._probe_points = {}
         self.probe_summary = ""
         self._rebuild_cache()
         self._rebuild_cap()
+        self._rebuild_hints()
 
         self._handle = bpy.types.SpaceView3D.draw_handler_add(
             self._draw, (context,), 'WINDOW', 'POST_VIEW')
@@ -163,9 +168,11 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         if problem:
             context.workspace.status_text_set(
                 "CANNOT CUT: " + problem.split(' — ')[0] + "    " + STATUS)
-        elif self.probe_summary:
+        elif self._joined or self._holes:
             context.workspace.status_text_set(
-                self.probe_summary + "    " + STATUS)
+                f"WILL NOT SEPARATE: red = cut still buried "
+                f"({len(self._joined)}), violet = cut leaves the model "
+                f"({len(self._holes)})    " + STATUS)
         else:
             context.workspace.status_text_set(STATUS)
 
@@ -212,6 +219,28 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
     # ------------------------------------------------------------------
     # Geometry helpers
     # ------------------------------------------------------------------
+
+    def _rebuild_hints(self, context=None):
+        """Where the model would stay joined, marked on it.
+
+        Costs a moment because it asks the model itself, so it is worked out
+        when editing starts and after each drag, not while dragging.
+        """
+        self._joined = []
+        self._holes = []
+        if not self.cut.pp_local:
+            return
+        try:
+            self._joined, self._holes = surface.find_join_hints(self.cut,
+                                                               self.target)
+        except Exception:
+            return
+        if context is not None and (self._joined or self._holes):
+            self.report(
+                {'WARNING'},
+                f"{len(self._joined)} spots where the cut stays buried, "
+                f"{len(self._holes)} where it leaves the model — this cut "
+                "would not separate yet")
 
     def _rebuild_cap(self):
         """The lid spanning the line, as it will be cut — rebuilt whenever the
@@ -442,6 +471,7 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
                     surface.refit_frame(self.cut)
                     self._rebuild_cache()
                     self._rebuild_cap()
+                    self._rebuild_hints()
                     self._update_status(context)
                 self.dragging = -1
                 return {'RUNNING_MODAL'}
@@ -510,6 +540,8 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
             return
         try:
             _draw_tris(self._cap_tris, CAP_COLOR)
+            _draw_points(self._holes, HOLE_COLOR, 8.0)
+            _draw_points(self._joined, JOINED_COLOR, 11.0)
 
             for line in self._cache['polylines']:
                 _draw_lines(line, LINE_COLOR_HIDDEN, 2.0, 'NONE')

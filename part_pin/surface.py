@@ -367,12 +367,29 @@ def suggest_undercut(probes, cut, resolution=None):
     return wanted
 
 
-def failure_reason(probes, cut):
-    """Why a cut that spans its line did not separate anything."""
+def failure_reason(probes, cut, target=None):
+    """Why a cut that spans its line did not separate anything, and where."""
+    joined, holes = [], []
+    if target is not None:
+        try:
+            joined, holes = find_join_hints(cut, target)
+        except Exception:
+            joined, holes = [], []
+    JOIN_HINTS[cut.name] = {'joined': joined, 'holes': holes}
+    look = " Open Edit Cut on Surface to see them marked on the model"
+    if joined:
+        return (f"nothing came away — the cut is still buried in the model at "
+                f"{len(joined)} spots along the line, so material wraps round "
+                "it there. Move the line to where the piece is clear, or raise "
+                "Undercut to reach through." + look)
+    if holes:
+        return (f"nothing came away — the cut surface leaves the model in "
+                f"{len(holes)} places, so the line encloses space rather than "
+                "solid material and the two sides join around it. Draw the "
+                "line closer round the piece." + look)
     return ("nothing came away — the piece must still be joined to the model "
-            "somewhere the line does not cross. Slide the line along the piece "
-            "to where it is clear of what it is buried in, or take it round "
-            "whatever holds it")
+            "somewhere the line does not cross. Slide the line along the "
+            "piece to where it is clear of what it is buried in")
 
 
 def cut_line_problem(cut, minimum_roundness=0.02):
@@ -1290,7 +1307,7 @@ def probe_summary(probes, cut):
 
 
 def cap_sheet(cut, target, usable, ring=96, relax=18, cuts=2,
-              settle_rim=True):
+              settle_rim=True, stuck=None):
     """The lid that spans a cut's line, in the cut's own space.
 
     Laid out inside the line, evened out, then lifted onto the cut's smooth
@@ -1391,11 +1408,18 @@ def cap_sheet(cut, target, usable, ring=96, relax=18, cuts=2,
             on_surface = model.matrix_world @ location
             outward = (normal_matrix @ normal).normalized()
             travelled = step_out
+            clear = False
             while travelled <= limit_out:
                 if not core.point_inside(target,
                                          on_surface + outward * travelled):
+                    clear = True
                     break
                 travelled += step_out
+            if not clear and stuck is not None:
+                # The rim is still buried here, so material wraps round it and
+                # holds the two sides together. This is the spot to move the
+                # line away from.
+                stuck.append(on_surface.copy())
             targets[vert] = matrix.inverted() @ (on_surface
                                                  + outward * travelled)
         for _pass in range(4):
@@ -1413,6 +1437,49 @@ def cap_sheet(cut, target, usable, ring=96, relax=18, cuts=2,
 
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     return bm, None
+
+
+# Where a cut was found to be still joined, per cut name, for the editor to
+# show. Transient: recomputed whenever it is wanted.
+JOIN_HINTS = {}
+
+
+def find_join_hints(cut, target, ring=96):
+    """Where the model would stay joined if this cut were made.
+
+    Two things keep a cut from separating, and both are found here rather than
+    guessed at: the rim of the cut still buried in the model, so material wraps
+    around it, and the cut's surface leaving the model in the middle, so the
+    two sides join through the gap.
+
+    Returns (joined_at, left_model), both lists of world positions.
+    """
+    usable, problem, _warning = loop_quality(cut, min_alignment=0.0)
+    if problem is not None:
+        return [], []
+    stuck = []
+    bm, problem = cap_sheet(cut, target, usable, ring=ring, stuck=stuck)
+    if bm is None:
+        return stuck, []
+
+    matrix = cut.matrix_world
+    holes = []
+    for face in bm.faces:
+        if any(edge.is_boundary for edge in face.edges):
+            continue
+        centre = matrix @ face.calc_center_median()
+        if not core.point_inside(target, centre):
+            holes.append(centre)
+    bm.free()
+    return _thin(stuck), _thin(holes)
+
+
+def _thin(points, most=60):
+    """Keep a readable spread of markers rather than a solid mass of them."""
+    if len(points) <= most:
+        return points
+    step = len(points) / most
+    return [points[int(i * step)] for i in range(most)]
 
 
 def cap_preview_tris(cut, target, ring=56, relax=10, cuts=1):
@@ -1449,7 +1516,10 @@ def build_cap_slab(cut, target, scene=None, ring=96, relax=18):
     if problem is not None:
         return None, problem, warning
 
-    bm, problem = cap_sheet(cut, target, usable, ring=ring, relax=relax)
+    stuck = []
+    bm, problem = cap_sheet(cut, target, usable, ring=ring, relax=relax,
+                            stuck=stuck)
+    JOIN_HINTS[cut.name] = {'joined': _thin(stuck), 'holes': []}
     if bm is None:
         return None, problem, warning
 

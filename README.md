@@ -109,12 +109,17 @@ Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
    surface. Draw round an arm at the armpit and the arm comes away, with
    the body untouched, for about 0.01% of the model's volume at the seam.
 
-   If nothing comes away, the piece is joined to the model somewhere your
-   line does not cross. Slide the line along the piece to where it is
-   clear of what it is buried in — the mushroom rule: cut across the stem,
-   not at the cap — or take the line around whatever holds it. *Undercut*
-   lets the cut's rim reach further out through the surface for a piece
-   that starts buried inside another part of the model.
+   **If nothing comes away, the editor shows you why and where.** Open
+   *Edit Cut on Surface* and the spots are marked on the model:
+
+   | Mark | Meaning | What to do |
+   | --- | --- | --- |
+   | Red | The cut is still buried in the model there, so material wraps round it | Move the line to where the piece is clear, or raise *Undercut* to reach through |
+   | Violet | The cut surface leaves the model there — the line encloses space rather than solid material, so the two sides join around it | Draw the line closer round the piece |
+
+   Both are worked out by asking the model itself, not guessed at, and they
+   refresh after each drag. The mushroom rule usually settles it: cut
+   across the stem, not at the cap.
 
    A cut picks up a line on **every** feature it crosses, and each one
    cuts. Hover a line and press **Alt+X** to drop the ones you don't

@@ -1384,7 +1384,19 @@ def scenario_joined_outside_line_reports(core):
           f"{volume(parts[0]):.4f} vs {before:.4f}")
     check("the reason is reported", len(failures) == 1, str(failures))
     check("it says what to do",
-          failures and "slide the line" in failures[0].lower(), str(failures))
+          failures and ("draw the line closer" in failures[0].lower()
+                        or "move the line" in failures[0].lower()
+                        or "slide the line" in failures[0].lower()),
+          str(failures))
+    check("it says where to look",
+          failures and "Edit Cut on Surface" in failures[0], str(failures))
+    joined, holes = surface.find_join_hints(cut, model)
+    check("the spots are found and marked", (joined or holes),
+          f"{len(joined)} buried, {len(holes)} leaving the model")
+    marks = joined + holes
+    check("the marks sit on the cut, not scattered over the model",
+          all((m - sum(marks, Vector()) / len(marks)).length
+              < core.bbox_diagonal(model) for m in marks))
 
 
 def scenario_check_line_operator(core):

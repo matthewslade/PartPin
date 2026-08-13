@@ -735,11 +735,8 @@ def create_parts(context, target, cuts, keep_original=True, part_gap=0.0,
                 # the one thing this mode promises not to do.
                 remove_object(cutter)
                 cutter = None
-                probes = surface.probe_cut_line(cut, target)
-                reason = surface.failure_reason(probes, cut)
-                failures.append(
-                    f"Cut '{cut.name}': {reason}. Open Edit Cut on Surface, "
-                    "or use Check Cut Line, to see the spots marked on it")
+                reason = surface.failure_reason(None, cut, target)
+                failures.append(f"Cut '{cut.name}': {reason}")
                 continue
         else:
             parts, split_any = split_parts(parts, cutter, parts_coll)
