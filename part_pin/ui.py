@@ -112,6 +112,12 @@ class PARTPIN_PT_shape(PARTPIN_PT_base, bpy.types.Panel):
                            f"{loops} line{'s' if loops != 1 else ''}",
                       icon='SURFACE_NSURFACE')
             box.prop(cut, "pp_local")
+            if not cut.pp_local:
+                box.label(text="Cuts through the whole model — reliable",
+                          icon='CHECKMARK')
+            else:
+                box.label(text="Untick if the cut will not separate",
+                          icon='INFO')
             sub = box.column()
             sub.enabled = cut.pp_local
             sub.prop(cut, "pp_undercut")

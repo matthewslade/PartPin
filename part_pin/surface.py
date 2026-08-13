@@ -958,19 +958,25 @@ def inspect_cut(cut, target, ring=96):
         return found
     found[BURIED] = list(buried)
 
-    # The rim, in the order it runs, so segments can be compared with segments.
-    rim = _rim_ring(bm)
-    spacing = (loop_length([v.co for v in rim]) / max(len(rim), 1)) if rim else 0.0
-    pinch = spacing * 0.35
-    for i, vert in enumerate(rim):
-        a1, a2 = vert.co, rim[(i + 1) % len(rim)].co
-        for j in range(i + 2, len(rim)):
-            if i == 0 and j == len(rim) - 1:
-                continue  # the two ends of the ring are neighbours
-            b1, b2 = rim[j].co, rim[(j + 1) % len(rim)].co
-            if _segments_touch(a1, a2, b1, b2, pinch):
-                found[FOLDED].append(matrix @ ((a1 + a2) * 0.5))
-                found[FOLDED].append(matrix @ ((b1 + b2) * 0.5))
+    # Each boundary is checked against itself, never against another.
+    rings = _rim_rings(bm)
+    if len(rings) > 1:
+        # A lid with more than one boundary has holes in it, which is worth
+        # saying: the cut cannot be trusted to separate anything.
+        for ring in rings[1:]:
+            found[FOLDED].extend(matrix @ vert.co for vert in ring[::4])
+    for ring in rings:
+        spacing = loop_length([v.co for v in ring]) / max(len(ring), 1)
+        pinch = spacing * 0.35
+        for i, vert in enumerate(ring):
+            a1, a2 = vert.co, ring[(i + 1) % len(ring)].co
+            for j in range(i + 2, len(ring)):
+                if i == 0 and j == len(ring) - 1:
+                    continue  # the ring's two ends are neighbours
+                b1, b2 = ring[j].co, ring[(j + 1) % len(ring)].co
+                if _segments_touch(a1, a2, b1, b2, pinch):
+                    found[FOLDED].append(matrix @ ((a1 + a2) * 0.5))
+                    found[FOLDED].append(matrix @ ((b1 + b2) * 0.5))
 
     # The middle of the lid: is it running through open space?
     edge_verts = {v for v in bm.verts if v.is_boundary}
@@ -998,19 +1004,30 @@ def surface_gap(target, world_point):
     return ((model.matrix_world @ near) - world_point).length
 
 
-def _rim_ring(bm):
-    """The lid's boundary vertices, in the order they run round it."""
-    start = next((v for v in bm.verts if v.is_boundary), None)
-    if start is None:
-        return []
-    ring, seen, vert = [], set(), start
-    while vert is not None and vert not in seen:
-        seen.add(vert)
-        ring.append(vert)
-        vert = next((edge.other_vert(vert) for edge in vert.link_edges
-                     if edge.is_boundary and edge.other_vert(vert) not in seen),
-                    None)
-    return ring
+def _rim_rings(bm):
+    """Every boundary of the lid, each in the order it runs round.
+
+    There can be more than one: a cut with several lines has one per line, and
+    a lid that failed to close over some triangle has a hole in it. Walking
+    only the first and treating the rest as part of it compares stretches of
+    one boundary against stretches of another, which reads as folds all over
+    the model — marks with nothing to do with anything.
+    """
+    rings = []
+    seen = set()
+    for start in bm.verts:
+        if not start.is_boundary or start in seen:
+            continue
+        ring, vert = [], start
+        while vert is not None and vert not in seen:
+            seen.add(vert)
+            ring.append(vert)
+            vert = next((edge.other_vert(vert) for edge in vert.link_edges
+                         if edge.is_boundary
+                         and edge.other_vert(vert) not in seen), None)
+        if len(ring) >= 4:
+            rings.append(ring)
+    return rings
 
 
 def _segments_touch(a1, a2, b1, b2, tolerance):

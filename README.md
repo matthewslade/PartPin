@@ -168,6 +168,18 @@ blender --background --python-exit-code 1 --python tests/smoke_test.py
 exporters, checking that every part comes out closed and manifold. On macOS the
 binary is usually `/Applications/Blender.app/Contents/MacOS/Blender`.
 
+## If a cut will not separate
+
+**Untick "Cut Inside Line Only".** That cuts along your drawn surface all the
+way through the model, using a cutter that is a height over a plane extruded
+into a solid — it cannot fold onto itself, so it always produces two clean,
+closed parts. It takes more of the model with the piece than the line asks
+for, which you can trim afterwards, but it works when the tighter cut will
+not.
+
+The tighter, line-only cut is the better result when it works, and it is not
+yet reliable on dense sculpts: see the limits below.
+
 ## Limits worth knowing
 
 - **The cut surface can fold onto itself** on an awkward line, and the exact
