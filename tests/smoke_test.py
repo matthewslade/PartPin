@@ -1676,6 +1676,54 @@ def scenario_draw_operator_registered(core):
           .keywords.get('default') is True)
 
 
+def scenario_trial_cut(core):
+    """Whether a cut separates is answered by trying it, and reasons are only
+    shown when the answer is no — a cut surface often passes outside the model
+    harmlessly, and marking that on a cut that works is noise."""
+    print("Scenario: try the cut, and only then explain")
+    reset_scene()
+    from part_pin import surface
+    s = bpy.context.scene.part_pin
+
+    model = make_limb(core)
+    s.target = model
+    cut = collar_cut(core, surface, model)
+    before = volume(model)
+    pieces, joined, holes = surface.trial_cut(cut, model)
+    check("a good line is reported as separating", pieces == 2, f"{pieces}")
+    check("and carries no marks", not joined and not holes,
+          f"{len(joined)} red, {len(holes)} violet")
+    check("the model itself is untouched",
+          abs(volume(model) - before) < 1e-9 and model.name
+          in bpy.context.scene.objects)
+    check("nothing is left behind",
+          not [o for o in bpy.context.scene.objects
+               if "Trial" in o.name or "Cap" in o.name],
+          str([o.name for o in bpy.context.scene.objects]))
+
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    blocked_model = make_limb_with_fin(core)
+    s.target = blocked_model
+    blocked = collar_cut(core, surface, blocked_model)
+    pieces, joined, holes = surface.trial_cut(blocked, blocked_model)
+    check("a blocked line is reported as not separating", pieces == 1,
+          f"{pieces}")
+    check("and carries marks explaining why", joined or holes,
+          f"{len(joined)} red, {len(holes)} violet")
+    check("the marks are recorded for the editor to draw",
+          surface.JOIN_HINTS.get(blocked.name, {}).get('holes')
+          or surface.JOIN_HINTS.get(blocked.name, {}).get('joined'))
+
+    # And the real cut agrees with the trial.
+    failures = []
+    parts, _applied, _warns = core.create_parts(
+        bpy.context, blocked_model, [blocked], keep_original=True,
+        failures=failures)
+    check("the trial matches what the cut does", len(parts) == pieces,
+          f"trial {pieces}, cut {len(parts)}")
+
+
 def scenario_line_hugs_surface(core):
     """The drawn line must lie on the model wherever it runs, and be lifted
     clear of it by a controllable amount so the surface does not swallow it."""
@@ -1941,6 +1989,7 @@ def main():
     scenario_draw_then_adjust(core)
     scenario_draw_cut_rejections(core)
     scenario_draw_operator_registered(core)
+    scenario_trial_cut(core)
     scenario_line_hugs_surface(core)
     scenario_cap_preview(core)
     scenario_cut_object_shows_the_lid(core)

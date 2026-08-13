@@ -115,17 +115,17 @@ Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
    surface. Draw round an arm at the armpit and the arm comes away, with
    the body untouched, for about 0.01% of the model's volume at the seam.
 
-   **If nothing comes away, the editor shows you why and where.** Open
-   *Edit Cut on Surface* and the spots are marked on the model:
+   **Will this cut work? Press T, or hit Try This Cut.** The cut is made
+   on a copy, and you are told whether it separates. Nothing is marked when
+   it does — parts of a cut surface often pass outside the model without
+   doing any harm, and pointing at those on a cut that works is only noise.
+
+   When it does not separate, the reasons are marked on the model:
 
    | Mark | Meaning | What to do |
    | --- | --- | --- |
-   | Red | The cut is still buried in the model there, so material wraps round it | Move the line to where the piece is clear, or raise *Undercut* to reach through |
-   | Violet | The cut surface leaves the model there — the line encloses space rather than solid material, so the two sides join around it | Draw the line closer round the piece |
-
-   Both are worked out by asking the model itself, not guessed at, and they
-   refresh after each drag. The mushroom rule usually settles it: cut
-   across the stem, not at the cap.
+   | Red | The cut is still buried in the model there, so material wraps round it | Move the line to where the piece is clear, or raise *Undercut* |
+   | Violet | The cut surface leaves the model there — the line encloses space as well as solid material, so the two sides join around it | Bring the line in closer where it rides over a raised edge |
 
    A cut picks up a line on **every** feature it crosses, and each one
    cuts. Hover a line and press **Alt+X** to drop the ones you don't

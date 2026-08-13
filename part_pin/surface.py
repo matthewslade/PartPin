@@ -376,7 +376,8 @@ def failure_reason(probes, cut, target=None):
         except Exception:
             joined, holes = [], []
     JOIN_HINTS[cut.name] = {'joined': joined, 'holes': holes}
-    look = " Open Edit Cut on Surface to see them marked on the model"
+    look = (" Open Edit Cut on Surface and press T to try the cut there, "
+            "which marks these on the model")
     if joined:
         return (f"nothing came away — the cut is still buried in the model at "
                 f"{len(joined)} spots along the line, so material wraps round "
@@ -1480,6 +1481,46 @@ def _thin(points, most=60):
         return points
     step = len(points) / most
     return [points[int(i * step)] for i in range(most)]
+
+
+def trial_cut(cut, target, scene=None):
+    """Actually try the cut on a copy and see what happens.
+
+    Whether a cut separates is a question about the model, not something to
+    infer from the shape of the cut: parts of the cut surface may well lie
+    outside the model without doing any harm. So this makes the cut, counts
+    what falls out, throws the copy away, and only looks for reasons when the
+    answer is that nothing came away.
+
+    Returns (pieces, joined_at, left_model).
+    """
+    scene = scene or bpy.context.scene
+    cap, problem, _warning = build_cap_slab(cut, target, scene)
+    if cap is None:
+        return 0, [], []
+    trial = core.duplicate_object(target, "PartPin_Trial", scene.collection)
+    trial.hide_render = True
+    pieces = 1
+    try:
+        if core.boolean_apply(trial, cap, 'DIFFERENCE'):
+            parts = core.split_loose(trial)
+            kept, _crumbs = core.drop_debris(parts)
+            pieces = len(kept)
+            for part in kept:
+                core.remove_object(part)
+        else:
+            core.remove_object(trial)
+    except Exception:
+        pieces = 0
+    finally:
+        core.remove_object(cap)
+
+    if pieces >= 2:
+        JOIN_HINTS[cut.name] = {'joined': [], 'holes': []}
+        return pieces, [], []
+    joined, holes = find_join_hints(cut, target)
+    JOIN_HINTS[cut.name] = {'joined': joined, 'holes': holes}
+    return pieces, joined, holes
 
 
 def cap_preview_tris(cut, target, ring=56, relax=10, cuts=1):

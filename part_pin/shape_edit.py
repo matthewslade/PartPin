@@ -36,7 +36,7 @@ SEGMENT_SUBDIV = 8
 STATUS = ("Drag points — the shaded surface is the cut    "
           "Ctrl+Click: add point    X: remove point    "
           "Alt+X: remove whole line    Ctrl+Wheel: falloff    "
-          "Enter: confirm    Esc: cancel")
+          "T: try the cut    Enter: confirm    Esc: cancel")
 
 
 def _draw_lines(points, color, width, depth_test):
@@ -168,11 +168,8 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         if problem:
             context.workspace.status_text_set(
                 "CANNOT CUT: " + problem.split(' — ')[0] + "    " + STATUS)
-        elif self._joined or self._holes:
-            context.workspace.status_text_set(
-                f"WILL NOT SEPARATE: red = cut still buried "
-                f"({len(self._joined)}), violet = cut leaves the model "
-                f"({len(self._holes)})    " + STATUS)
+        elif self._verdict:
+            context.workspace.status_text_set(self._verdict + "    " + STATUS)
         else:
             context.workspace.status_text_set(STATUS)
 
@@ -220,27 +217,40 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
     # Geometry helpers
     # ------------------------------------------------------------------
 
-    def _rebuild_hints(self, context=None):
-        """Where the model would stay joined, marked on it.
-
-        Costs a moment because it asks the model itself, so it is worked out
-        when editing starts and after each drag, not while dragging.
-        """
+    def _clear_hints(self):
+        """Forget any marks: the line has moved, so they are out of date."""
         self._joined = []
         self._holes = []
+        self._verdict = ""
+
+    def _try_cut(self, context):
+        """Make the cut on a copy and say whether it separates.
+
+        Marks are only worth showing once the answer is no. Parts of a cut
+        surface often lie outside the model without doing any harm, and
+        pointing at those on a cut that works is just noise.
+        """
+        self._clear_hints()
         if not self.cut.pp_local:
+            self.report({'INFO'}, "This cut is not limited to its line")
             return
         try:
-            self._joined, self._holes = surface.find_join_hints(self.cut,
-                                                               self.target)
+            pieces, joined, holes = surface.trial_cut(self.cut, self.target)
         except Exception:
+            self.report({'WARNING'}, "Could not try the cut")
             return
-        if context is not None and (self._joined or self._holes):
-            self.report(
-                {'WARNING'},
-                f"{len(self._joined)} spots where the cut stays buried, "
-                f"{len(self._holes)} where it leaves the model — this cut "
-                "would not separate yet")
+        if pieces >= 2:
+            self._verdict = f"This cut separates into {pieces} parts"
+            self.report({'INFO'}, self._verdict)
+        else:
+            self._joined, self._holes = joined, holes
+            self._verdict = ("This cut would not separate — marked: red where "
+                             "it stays buried, violet where it leaves the "
+                             "model")
+            self.report({'WARNING'}, self._verdict)
+        self._update_status(context)
+        if self.area:
+            self.area.tag_redraw()
 
     def _rebuild_cap(self):
         """The lid spanning the line, as it will be cut — rebuilt whenever the
@@ -477,10 +487,14 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
                     surface.refit_frame(self.cut)
                     self._rebuild_cache()
                     self._rebuild_cap()
-                    self._rebuild_hints()
+                    self._clear_hints()
                     self._update_status(context)
                 self.dragging = -1
                 return {'RUNNING_MODAL'}
+
+        if event.type == 'T' and event.value == 'PRESS':
+            self._try_cut(context)
+            return {'RUNNING_MODAL'}
 
         if event.type in {'X', 'DEL'} and event.value == 'PRESS':
             if event.alt:
@@ -594,10 +608,10 @@ def _surface_cut(context):
 
 class PARTPIN_OT_check_cut_line(bpy.types.Operator):
     bl_idname = "partpin.check_cut_line"
-    bl_label = "Check Cut Line"
+    bl_label = "Try This Cut"
     bl_description = (
-        "Check that this cut's line closes into a loop on the model that can "
-        "be spanned and cut"
+        "Make this cut on a copy and say whether it separates. If it does "
+        "not, the reasons are marked on the model in Edit Cut on Surface"
     )
     bl_options = {'REGISTER'}
 
@@ -613,19 +627,33 @@ class PARTPIN_OT_check_cut_line(bpy.types.Operator):
         if problem:
             self.report({'ERROR'}, f"Cut '{cut.name}': {problem}")
             return {'CANCELLED'}
+        if not cut.pp_local:
+            self.report({'INFO'}, "This cut is not limited to its line")
+            return {'FINISHED'}
 
-        cap, problem, warning = surface.build_cap_slab(cut, target)
-        if warning:
-            self.report({'WARNING'}, warning)
-        if cap is None:
-            self.report({'ERROR'}, f"Cut '{cut.name}': {problem}")
-            return {'CANCELLED'}
-        faces = len(cap.data.polygons)
-        core.remove_object(cap)
-        self.report({'INFO'},
-                    f"Cut line spans a surface of {faces} faces — ready to "
-                    "cut. If nothing comes away, the piece is joined to the "
-                    "model outside the line: slide the line along it")
+        pieces, joined, holes = surface.trial_cut(cut, target)
+        if pieces >= 2:
+            self.report({'INFO'},
+                        f"Cut '{cut.name}' separates into {pieces} parts")
+            return {'FINISHED'}
+        if joined:
+            self.report({'WARNING'},
+                        f"Cut '{cut.name}' would not separate: still buried in "
+                        f"the model at {len(joined)} spots along the line. Move "
+                        "the line to where the piece is clear, or raise "
+                        "Undercut. Open Edit Cut on Surface to see them in red")
+        elif holes:
+            self.report({'WARNING'},
+                        f"Cut '{cut.name}' would not separate: the cut surface "
+                        f"leaves the model in {len(holes)} places, so the line "
+                        "encloses space as well as solid material and the two "
+                        "sides join around it. Bring the line in closer where "
+                        "it rides over a raised edge. Open Edit Cut on Surface "
+                        "to see them in violet")
+        else:
+            self.report({'WARNING'},
+                        f"Cut '{cut.name}' would not separate — the piece is "
+                        "joined to the model somewhere the line does not cross")
         return {'FINISHED'}
 
 
