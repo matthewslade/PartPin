@@ -9,6 +9,7 @@ curved cuts, built-in and custom connectors, pin/socket generation,
 manifold validation, and STL/OBJ/FBX export.
 """
 
+import math
 import os
 import sys
 import tempfile
@@ -335,6 +336,359 @@ def scenario_export(core):
     print(f"  export dir: {tmp}")
 
 
+def surface_distance(obj, world_point):
+    """Distance from a world point to an object's surface."""
+    ok, loc, _n, _i = obj.closest_point_on_mesh(
+        obj.matrix_world.inverted() @ world_point)
+    if not ok:
+        return float('inf')
+    return ((obj.matrix_world @ loc) - world_point).length
+
+
+def scenario_height_field(core):
+    print("Scenario: height field maths")
+    from part_pin import surface
+    from mathutils import Vector as V
+
+    flat = surface.HeightField([V((0, 0, 0)), V((1, 0, 0)), V((0, 1, 0))])
+    check("flat field stays flat", abs(flat.eval(0.4, 0.4)) < 1e-12)
+
+    nodes = [V((0, 0, 0)), V((1, 0, 0.3)), V((0, 1, -0.2)), V((1, 1, 0.1)),
+             V((0.5, 0.5, 0.25))]
+    field = surface.HeightField(nodes, falloff=2.0)
+    worst = max(abs(field.eval(n.x, n.y) - n.z) for n in nodes)
+    check("field passes through every control point", worst < 1e-4,
+          f"max error {worst:.2e}")
+    far = abs(field.eval(14.0, 14.0))
+    check("field flattens away from the points", far < 1e-3,
+          f"h={far:.2e}")
+    n = field.normal(0.5, 0.5)
+    check("normal is unit length and upward",
+          abs(n.length - 1.0) < 1e-6 and n.z > 0.0)
+
+
+def scenario_surface_convert(core):
+    print("Scenario: plane cut → editable surface cut")
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_sphere()
+    original_volume = volume(model)
+    s.target = model
+    from part_pin import surface
+
+    bpy.ops.partpin.add_plane_cut()
+    cut = bpy.context.view_layer.objects.active
+    cut, error = surface.convert_to_surface(bpy.context, cut, model,
+                                           per_loop=16)
+    check("conversion succeeded", cut is not None, str(error))
+    if cut is None:
+        return
+    check("cut is now a surface cut", cut.pp_cut_kind == 'SURFACE')
+    check("16 control points stored", len(cut.pp_points) == 16,
+          f"got {len(cut.pp_points)}")
+
+    on_surface = max(surface_distance(model, cut.matrix_world @ Vector(p.co))
+                     for p in cut.pp_points)
+    check("control points sit on the model surface", on_surface < 1e-3,
+          f"max {on_surface:.2e}")
+    heights = [abs(p.co[2]) for p in cut.pp_points]
+    check("unedited surface is still flat", max(heights) < 1e-6)
+
+    bpy.ops.partpin.create_parts()
+    parts = parts_of(s)
+    check("flat surface cut still makes two parts", len(parts) == 2)
+    for p in parts:
+        check(f"part closed: {p.name}", is_closed(core, p))
+    if len(parts) == 2:
+        total = sum(volume(p) for p in parts)
+        check("volume conserved", abs(total - original_volume) < 0.01,
+              f"{total:.4f} vs {original_volume:.4f}")
+
+
+def scenario_surface_drag(core):
+    print("Scenario: dragging a point reshapes the cut")
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_sphere()
+    original_volume = volume(model)
+    s.target = model
+    from part_pin import surface
+    import math
+
+    bpy.ops.partpin.add_plane_cut()
+    cut = bpy.context.view_layer.objects.active
+    cut, error = surface.convert_to_surface(bpy.context, cut, model,
+                                           per_loop=16)
+    if cut is None:
+        check("conversion succeeded", False, str(error))
+        return
+
+    # Simulate a drag: slide one point up the sphere to 40° latitude,
+    # exactly what the modal operator does on mouse-move.
+    point = cut.pp_points[0]
+    start = cut.matrix_world @ Vector(point.co)
+    azimuth = math.atan2(start.y, start.x)
+    lat = math.radians(40.0)
+    # Snap onto the faceted mesh, exactly like a viewport ray-cast hit.
+    dragged = surface.project_to_surface(
+        model, Vector((math.cos(lat) * math.cos(azimuth),
+                       math.cos(lat) * math.sin(azimuth),
+                       math.sin(lat))))
+    check("drag target is on the model surface",
+          surface_distance(model, dragged) < 1e-6,
+          f"{surface_distance(model, dragged):.2e}")
+    point.co = cut.matrix_world.inverted() @ dragged
+    surface.build_display_mesh(cut, model)
+
+    field = surface.field_for(cut)
+    local = Vector(point.co)
+    check("cut surface passes through the dragged point",
+          abs(field.eval(local.x, local.y) - local.z) < 1e-4,
+          f"{field.eval(local.x, local.y):.6f} vs {local.z:.6f}")
+
+    bpy.ops.partpin.create_parts()
+    parts = parts_of(s)
+    check("reshaped cut makes two parts", len(parts) == 2, f"got {len(parts)}")
+    for p in parts:
+        check(f"part closed: {p.name}", is_closed(core, p))
+    if len(parts) != 2:
+        return
+
+    total = sum(volume(p) for p in parts)
+    check("volume conserved after reshaping",
+          abs(total - original_volume) < 0.02,
+          f"{total:.4f} vs {original_volume:.4f}")
+
+    # The seam must actually run through the dragged point: it lies on the
+    # cut face, which both parts share.
+    worst = max(surface_distance(p, dragged) for p in parts)
+    check("both parts touch the dragged point", worst < 0.02,
+          f"max distance {worst:.4f}")
+
+    lower = min(parts, key=lambda p: z_range(p)[0])
+    check("cut is no longer flat (lower part bulges upward)",
+          z_range(lower)[1] > 0.3, f"max z {z_range(lower)[1]:.4f}")
+
+    bpy.ops.partpin.clear_drafts()
+
+
+def scenario_surface_connectors(core):
+    print("Scenario: connectors on a reshaped cut")
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_sphere()
+    s.target = model
+    s.count = 2
+    from part_pin import surface
+
+    bpy.ops.partpin.add_plane_cut()
+    cut = bpy.context.view_layer.objects.active
+    cut, _error = surface.convert_to_surface(bpy.context, cut, model,
+                                             per_loop=12)
+    point = cut.pp_points[0]
+    point.co = (point.co[0], point.co[1], 0.35)
+    surface.build_display_mesh(cut, model)
+
+    bpy.context.view_layer.objects.active = cut
+    bpy.ops.partpin.add_connectors()
+    conns = core.cut_connectors(bpy.context.scene, cut)
+    check("connectors placed on the surface cut", len(conns) == 2,
+          f"got {len(conns)}")
+
+    field = surface.field_for(cut)
+    off = 0.0
+    for conn in conns:
+        local = cut.matrix_world.inverted() @ conn.matrix_world.translation
+        off = max(off, abs(field.eval(local.x, local.y) - local.z))
+    check("connectors sit on the cut surface", off < 1e-4,
+          f"max {off:.2e}")
+
+    # Nudge one off the surface, then snap it back.
+    conns[0].matrix_world.translation += Vector((0.0, 0.0, 0.2))
+    bpy.context.view_layer.update()
+    moved = surface.snap_connectors(cut)
+    check("snap moved the connectors", moved == 2)
+    local = cut.matrix_world.inverted() @ conns[0].matrix_world.translation
+    check("nudged connector snapped back onto the surface",
+          abs(field.eval(local.x, local.y) - local.z) < 1e-4)
+
+    bpy.ops.partpin.create_parts()
+    parts = parts_of(s)
+    check("reshaped cut + connectors gives two parts", len(parts) == 2)
+    for p in parts:
+        check(f"part closed: {p.name}", is_closed(core, p))
+    bpy.ops.partpin.clear_drafts()
+
+
+def scenario_surface_multi_loop(core):
+    print("Scenario: cut with two section loops (torus)")
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    bpy.ops.mesh.primitive_torus_add(major_radius=1.0, minor_radius=0.3,
+                                     major_segments=64, minor_segments=24)
+    model = bpy.context.view_layer.objects.active
+    model.name = "Ring"
+    s.target = model
+    from part_pin import surface
+
+    bpy.ops.partpin.add_plane_cut()
+    cut = bpy.context.view_layer.objects.active
+    cut.rotation_euler = (0.0, math.radians(90.0), 0.0)
+    bpy.context.view_layer.update()
+
+    loops = surface.plane_section_loops(model, cut.matrix_world)
+    check("two section loops found on the ring", len(loops) == 2,
+          f"got {len(loops)}")
+
+    cut, error = surface.convert_to_surface(bpy.context, cut, model,
+                                           per_loop=10)
+    check("multi-loop conversion succeeded", cut is not None, str(error))
+    if cut is None:
+        return
+    check("points stored for both loops", len(cut.pp_points) == 20,
+          f"got {len(cut.pp_points)}")
+    check("two distinct loop ids",
+          len({p.loop for p in cut.pp_points}) == 2)
+
+    bpy.ops.partpin.create_parts()
+    parts = parts_of(s)
+    check("ring split in two", len(parts) == 2, f"got {len(parts)}")
+    for p in parts:
+        check(f"part closed: {p.name}", is_closed(core, p))
+
+
+def scenario_surface_from_curve(core):
+    print("Scenario: drawn curve cut → surface cut")
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_sphere()
+    s.target = model
+    from part_pin import surface
+    from mathutils import Quaternion as Q
+
+    data = bpy.data.curves.new("Cut Curve", 'CURVE')
+    data.dimensions = '2D'
+    data.fill_mode = 'NONE'
+    spline = data.splines.new('POLY')
+    spline.points.add(4)
+    for point, (x, y) in zip(spline.points,
+                             [(-2.0, 0.0), (-1.0, 0.22), (0.0, -0.18),
+                              (1.0, 0.22), (2.0, 0.0)]):
+        point.co = (x, y, 0.0, 1.0)
+    cut = bpy.data.objects.new("Cut Curve", data)
+    link(cut)
+    cut.rotation_mode = 'QUATERNION'
+    cut.rotation_quaternion = Q((1.0, 0.0, 0.0), 1.5707963)
+    cut.pp_role = core.ROLE_CUT
+    cut.pp_cut_kind = 'CURVE'
+    cut.pp_enabled = True
+    bpy.context.view_layer.update()
+
+    loops = surface.curve_section_loops(model, cut)
+    check("curve section loop found", len(loops) == 1 and len(loops[0]) > 8,
+          f"{[len(l) for l in loops]}")
+
+    cut, error = surface.convert_to_surface(bpy.context, cut, model,
+                                            per_loop=20)
+    check("curve → surface conversion succeeded", cut is not None, str(error))
+    if cut is None:
+        return
+    check("converted cut is a mesh surface cut",
+          cut.type == 'MESH' and cut.pp_cut_kind == 'SURFACE')
+    on_surface = max(surface_distance(model, cut.matrix_world @ Vector(p.co))
+                     for p in cut.pp_points)
+    check("converted points lie on the model surface", on_surface < 5e-3,
+          f"max {on_surface:.2e}")
+
+    bpy.ops.partpin.create_parts()
+    parts = parts_of(s)
+    check("converted curve cut still splits the model", len(parts) == 2,
+          f"got {len(parts)}")
+    for p in parts:
+        check(f"part closed: {p.name}", is_closed(core, p))
+
+
+def scenario_modal_helpers(core):
+    """Drive the modal operator's logic directly (everything but the GPU)."""
+    print("Scenario: surface-edit modal helpers")
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_sphere()
+    s.target = model
+    from part_pin import shape_edit, surface
+
+    bpy.ops.partpin.add_plane_cut()
+    cut = bpy.context.view_layer.objects.active
+    cut, _error = surface.convert_to_surface(bpy.context, cut, model,
+                                            per_loop=12)
+
+    # bpy operator classes cannot be instantiated, so bind the methods under
+    # test to a stand-in holding the same state invoke() would have set up.
+    import types
+    cls = shape_edit.PARTPIN_OT_edit_cut_surface
+    op = types.SimpleNamespace()
+    for name in ('_rebuild_cache', '_insert_point', '_delete_point',
+                 '_nearest_point', '_surface_hit'):
+        setattr(op, name, getattr(cls, name).__get__(op))
+    op.cut, op.target = cut, model
+    op.hover, op.dragging, op.moved, op._cache = -1, -1, False, None
+    op.report = lambda *a, **k: None
+
+    op._rebuild_cache()
+    check("cache holds one cut line", len(op._cache['polylines']) == 1)
+    line = op._cache['polylines'][0]
+    check("cut line is densified and closed",
+          len(line) == 12 * shape_edit.SEGMENT_SUBDIV + 1
+          and (line[0] - line[-1]).length < 1e-9, f"{len(line)} points")
+    off = max(surface_distance(model, p) for p in line)
+    check("drawn cut line hugs the model surface", off < 0.02,
+          f"max {off:.4f}")
+    check("one world position per control point",
+          len(op._cache['world']) == 12)
+
+    # Ctrl+click insert: the new point must land on the surface, in a loop.
+    hit = surface.project_to_surface(model, Vector((1.0, 0.02, 0.0)))
+    op._surface_hit = lambda context, mouse: hit
+    op._insert_point(bpy.context, (0, 0))
+    check("insert added a control point", len(cut.pp_points) == 13,
+          f"got {len(cut.pp_points)}")
+    worst = max(surface_distance(model, cut.matrix_world @ Vector(p.co))
+                for p in cut.pp_points)
+    check("all points still on the model surface", worst < 1e-3,
+          f"max {worst:.2e}")
+    check("inserted point kept the loop id",
+          {p.loop for p in cut.pp_points} == {0})
+    inserted = min(range(len(cut.pp_points)),
+                   key=lambda i: ((cut.matrix_world
+                                   @ Vector(cut.pp_points[i].co)) - hit).length)
+    check("inserted point is adjacent to its neighbours in storage order",
+          0 < inserted < 13)
+
+    op.hover = 0
+    op._delete_point(0)
+    check("delete removed a control point", len(cut.pp_points) == 12,
+          f"got {len(cut.pp_points)}")
+
+    # Guard: never shrink a loop below 3 points.
+    keep = [(Vector(p.co), p.loop) for p in cut.pp_points][:3]
+    surface.store_control_points(cut, [c for c, _l in keep],
+                                [l for _c, l in keep])
+    op._delete_point(0)
+    check("refuses to delete below 3 points", len(cut.pp_points) == 3,
+          f"got {len(cut.pp_points)}")
+
+
+def scenario_operators_registered(core):
+    print("Scenario: new operators registered")
+    reset_scene()
+    for name in ("edit_cut_surface", "snap_connectors", "reset_cut_shape"):
+        check(f"partpin.{name} exists",
+              hasattr(bpy.ops.partpin, name))
+    # poll must refuse cleanly with no model picked (and no UI context)
+    check("edit_cut_surface poll is False with nothing set up",
+          not bpy.ops.partpin.edit_cut_surface.poll())
+
+
 def main():
     reset_scene()
     import part_pin
@@ -347,6 +701,14 @@ def main():
     scenario_custom_connector(core)
     scenario_flip_pin(core)
     scenario_validation(core)
+    scenario_height_field(core)
+    scenario_surface_convert(core)
+    scenario_surface_drag(core)
+    scenario_surface_connectors(core)
+    scenario_surface_multi_loop(core)
+    scenario_surface_from_curve(core)
+    scenario_modal_helpers(core)
+    scenario_operators_registered(core)
     scenario_export(core)  # runs easy mode internally, then exports
 
     print()

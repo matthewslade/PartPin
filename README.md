@@ -38,7 +38,33 @@ Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
    - Cuts are listed in the panel — click to select, tick to
      enable/disable, ✕ to delete. Nothing touches the model until you
      confirm.
-3. **Add connectors** — with a cut active, **Add Connectors** places
+3. **Fine-tune the cut on the model** (optional, and the nicest way to
+   work) — hit **Edit Cut on Surface**. The cut plane itself disappears
+   and you get the actual line where the cut meets your model, with
+   draggable points sitting on its surface:
+
+   | Action | Result |
+   | --- | --- |
+   | Drag a point | It slides along the model's surface; the cut reshapes to pass through it |
+   | Ctrl+Click | Add a point on the surface |
+   | X | Remove the point under the cursor |
+   | Ctrl+Wheel | Widen / tighten the falloff (how far each point's pull spreads) |
+   | Enter | Confirm |
+   | Esc | Revert |
+
+   Middle-mouse and the scroll wheel still orbit and zoom, so you can
+   spin the model around while editing.
+
+   Because a plane is defined by only three points, dragging points
+   turns the cut into a **free-form cut surface**: a smooth surface that
+   passes exactly through every point you place. It is stored as a
+   height field over the original plane, which means it can never fold
+   back on itself — the cut always yields two clean, closed parts. Cuts
+   with two section lines (a ring, for example) are supported: both are
+   editable at once. **Flatten** returns a reshaped cut to a plane, and
+   **Snap Connectors** re-seats existing pins onto the new surface.
+
+4. **Add connectors** — with a cut active, **Add Connectors** places
    `Count` pins spaced along the cut cross-section. They are ordinary
    draft objects: move, rotate, scale, duplicate (Shift+D) or delete
    them. Shapes: **Cylinder**, **Tapered** (self-centering, the default),
@@ -51,13 +77,13 @@ Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
      Object* to see it).
    - **Auto Size** derives sensible pin dimensions from the model; it
      also happens automatically the first time you add connectors.
-4. **Create Parts** — applies every enabled cut, unions the pins into
+5. **Create Parts** — applies every enabled cut, unions the pins into
    their parts and subtracts clearance-fattened sockets from the mating
    parts. Final parts land in a new `<Model> Parts` collection; the
    original is kept hidden (untick *Keep Original* to discard it).
    *Part Gap* moves the finished parts apart so you can inspect the
    seams.
-5. **Export** — STL, OBJ or FBX; one file per part or a single file.
+6. **Export** — STL, OBJ or FBX; one file per part or a single file.
    If you model true-to-scale in meters, set *Scale* to 1000 so slicers
    (which read STL units as mm) get the size right. If you already work
    "1 unit = 1 mm", leave it at 1.
@@ -75,6 +101,8 @@ step.
 - Easy mode: one-click cut for simple models
 - Straight cuts with a movable / rotatable / scalable plane
 - Drawn curved cuts (freehand stroke in the viewport)
+- On-surface fine-tuning: drag the cut line's points along the model to
+  reshape the cut, with add/remove points and adjustable falloff
 - Built-in connector shapes plus custom connector meshes
 - Connector position / rotation / scale editing and pin-side flip
 - Adjustable pin/socket clearance, per connector
@@ -83,9 +111,9 @@ step.
 
 ## Testing
 
-Headless smoke test (no UI needed) — runs cuts, connectors, easy mode,
-validation and all three exporters, and checks every part comes out
-closed and manifold:
+Headless smoke test (no UI needed) — runs cuts, connectors, surface
+reshaping, easy mode, validation and all three exporters, and checks
+every part comes out closed and manifold:
 
 ```sh
 blender --background --python-exit-code 1 --python tests/smoke_test.py
@@ -101,6 +129,14 @@ On macOS the binary is usually
 - Curved cuts assume one stroke drawn across the model (or a closed
   loop). Strongly self-intersecting scribbles won't produce a valid cut
   volume.
+- On-surface editing needs the cut line to stay a simple shape when
+  viewed down the cut's normal. A drawn cut that doubles back on itself
+  that severely is refused with a message rather than cut badly — edit
+  its stroke instead.
+- Dragged points follow the visible surface, so to move one round the
+  back of the model, orbit the view first.
+- Surface cuts are graded by *Surface Detail*: raise it if a reshaped cut
+  looks faceted, lower it if cutting gets slow.
 - Modifiers on the model are baked into the parts.
 - Work on one model at a time; *Clear All Cuts* resets the drafts.
 

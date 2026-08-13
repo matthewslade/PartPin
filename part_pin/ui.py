@@ -60,8 +60,10 @@ class PARTPIN_PT_cuts(PARTPIN_PT_base, bpy.types.Panel):
                 icon = 'CHECKBOX_HLT' if cut.pp_enabled else 'CHECKBOX_DEHLT'
                 row.operator("partpin.cut_toggle", text="", icon=icon,
                              emboss=False).cut_name = cut.name
-                kind_icon = ('CURVE_BEZCURVE' if cut.pp_cut_kind == 'CURVE'
-                             else 'MESH_PLANE')
+                kind_icon = {
+                    'CURVE': 'CURVE_BEZCURVE',
+                    'SURFACE': 'SURFACE_NSURFACE',
+                }.get(cut.pp_cut_kind, 'MESH_PLANE')
                 row.operator("partpin.cut_select", text=cut.name,
                              icon=kind_icon,
                              depress=(cut == active)).cut_name = cut.name
@@ -70,6 +72,42 @@ class PARTPIN_PT_cuts(PARTPIN_PT_base, bpy.types.Panel):
             layout.operator("partpin.clear_drafts", icon='TRASH')
         else:
             layout.label(text="No cuts yet", icon='DOT')
+
+
+class PARTPIN_PT_shape(PARTPIN_PT_base, bpy.types.Panel):
+    bl_idname = "PARTPIN_PT_shape"
+    bl_parent_id = "PARTPIN_PT_cuts"
+    bl_label = "Fine-Tune on Surface"
+
+    def draw(self, context):
+        layout = self.layout
+        s = core.get_settings(context)
+        active = context.view_layer.objects.active
+        cut = None
+        if active is not None:
+            if active.pp_role == core.ROLE_CUT:
+                cut = active
+            elif active.pp_role == core.ROLE_CONNECTOR:
+                cut = active.parent
+
+        col = layout.column()
+        col.scale_y = 1.4
+        col.operator("partpin.edit_cut_surface", icon='MOD_MESHDEFORM')
+        layout.prop(s, "handle_points")
+
+        if cut is not None and cut.pp_cut_kind == 'SURFACE':
+            box = layout.box()
+            box.label(text=f"{len(cut.pp_points)} points on {cut.name}",
+                      icon='SURFACE_NSURFACE')
+            box.prop(cut, "pp_falloff")
+            box.prop(s, "surface_resolution")
+            row = box.row(align=True)
+            row.operator("partpin.snap_connectors", text="Snap Connectors")
+            row.operator("partpin.reset_cut_shape", text="Flatten")
+        else:
+            layout.label(text="Drag the cut line right on the model",
+                         icon='INFO')
+        layout.prop(s, "auto_snap_connectors")
 
 
 class PARTPIN_PT_connectors(PARTPIN_PT_base, bpy.types.Panel):
@@ -157,6 +195,7 @@ class PARTPIN_PT_export(PARTPIN_PT_base, bpy.types.Panel):
 CLASSES = (
     PARTPIN_PT_main,
     PARTPIN_PT_cuts,
+    PARTPIN_PT_shape,
     PARTPIN_PT_connectors,
     PARTPIN_PT_finalize,
     PARTPIN_PT_export,

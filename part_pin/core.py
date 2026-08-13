@@ -166,6 +166,7 @@ def boolean_apply(obj, other, operation):
 
 def point_inside(obj, world_point):
     """Ray-parity point-in-volume test against a closed mesh object."""
+    obj = obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
     inv = obj.matrix_world.inverted()
     origin = inv @ world_point
     direction = Vector((0.4231, 0.5713, 0.7031)).normalized()
@@ -285,6 +286,12 @@ def make_curve_cutter(curve_obj, target, scene):
 
 
 def build_cutter(cut_obj, target, scene):
+    if cut_obj.pp_cut_kind == 'SURFACE':
+        # Imported here: surface.py builds on this module's helpers.
+        from . import surface
+        resolution = get_settings(bpy.context).surface_resolution
+        return surface.build_surface_cutter(cut_obj, target, resolution,
+                                            scene)
     if cut_obj.pp_cut_kind == 'CURVE':
         return make_curve_cutter(cut_obj, target, scene)
     return make_halfspace_cutter(cut_obj.matrix_world, bbox_diagonal(target),

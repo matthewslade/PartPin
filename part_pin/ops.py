@@ -9,7 +9,7 @@ import bpy
 from bpy.props import BoolProperty, EnumProperty, StringProperty
 from mathutils import Matrix, Quaternion, Vector
 
-from . import core
+from . import core, surface
 from .props import AXIS_ITEMS
 
 AXIS_ROTATIONS = {
@@ -374,7 +374,10 @@ class PARTPIN_OT_add_connectors(bpy.types.Operator):
         if not s.sized:
             core.auto_size_defaults(s, target)
 
-        if cut.pp_cut_kind == 'CURVE':
+        if cut.pp_cut_kind == 'SURFACE':
+            matrices = surface.surface_connector_matrices(target, cut,
+                                                          s.count)
+        elif cut.pp_cut_kind == 'CURVE':
             matrices = core.curve_connector_matrices(target, cut, s.count)
         else:
             matrices = core.plane_connector_matrices(target, cut, s.count)

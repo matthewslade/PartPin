@@ -3,8 +3,10 @@
 import bpy
 from bpy.props import (
     BoolProperty,
+    CollectionProperty,
     EnumProperty,
     FloatProperty,
+    FloatVectorProperty,
     IntProperty,
     PointerProperty,
     StringProperty,
@@ -43,6 +45,13 @@ def _mark_sized(self, context):
     # auto-deriving them when connectors are added.
     if not self.sized:
         self.sized = True
+
+
+class PartPinControlPoint(bpy.types.PropertyGroup):
+    """One draggable point on a surface cut, in the cut's local space."""
+
+    co: FloatVectorProperty(size=3, subtype='XYZ')
+    loop: IntProperty(default=0)
 
 
 class PartPinSettings(bpy.types.PropertyGroup):
@@ -115,6 +124,38 @@ class PartPinSettings(bpy.types.PropertyGroup):
     sized: BoolProperty(default=False, options={'HIDDEN'})
 
     # ------------------------------------------------------------------
+    # On-surface cut editing
+    # ------------------------------------------------------------------
+    handle_points: IntProperty(
+        name="Points",
+        description=(
+            "How many draggable points to place around each cut line when "
+            "surface editing starts"
+        ),
+        default=16,
+        min=3,
+        max=96,
+    )
+    surface_resolution: IntProperty(
+        name="Surface Detail",
+        description=(
+            "Grid resolution of a reshaped cut surface. Higher follows the "
+            "dragged points more closely but cuts more slowly"
+        ),
+        default=48,
+        min=8,
+        max=160,
+    )
+    auto_snap_connectors: BoolProperty(
+        name="Snap Connectors",
+        description=(
+            "After reshaping a cut, move its connectors back onto the new "
+            "surface and align them to it"
+        ),
+        default=True,
+    )
+
+    # ------------------------------------------------------------------
     # Finalize
     # ------------------------------------------------------------------
     keep_original: BoolProperty(
@@ -171,7 +212,7 @@ class PartPinSettings(bpy.types.PropertyGroup):
     )
 
 
-CLASSES = (PartPinSettings,)
+CLASSES = (PartPinControlPoint, PartPinSettings)
 
 
 def register():
@@ -204,8 +245,24 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.Scene.part_pin = PointerProperty(type=PartPinSettings)
 
+    # Surface-cut shape data (registered after PartPinControlPoint exists).
+    bpy.types.Object.pp_points = CollectionProperty(type=PartPinControlPoint)
+    bpy.types.Object.pp_falloff = FloatProperty(
+        name="Falloff",
+        description=(
+            "How far a dragged point's influence spreads across the cut, "
+            "in multiples of the spacing between points. Low is local and "
+            "sharp, high is broad and smooth"
+        ),
+        default=2.0,
+        min=0.2,
+        max=12.0,
+    )
+
 
 def unregister():
+    del bpy.types.Object.pp_points
+    del bpy.types.Object.pp_falloff
     del bpy.types.Scene.part_pin
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)
