@@ -124,8 +124,8 @@ Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
 
    | Mark | Meaning | What to do |
    | --- | --- | --- |
-   | Red | The cut is still buried in the model there, so material wraps round it | Move the line to where the piece is clear, or raise *Undercut* |
-   | Violet | The cut surface leaves the model there — the line encloses space as well as solid material, so the two sides join around it | Bring the line in closer where it rides over a raised edge |
+   | Red | Material carries on past the line there, joining the two sides around the cut | Move the line past that material, or raise *Undercut* to reach through it |
+   | Violet | The cut surface leaves the model well inside the line, so the line encloses space as well as solid material | Bring the line in closer where it rides over a raised edge |
 
    A cut picks up a line on **every** feature it crosses, and each one
    cuts. Hover a line and press **Alt+X** to drop the ones you don't

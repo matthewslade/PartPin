@@ -1341,11 +1341,25 @@ def cap_sheet(cut, target, usable, ring=96, relax=18, cuts=2,
         local = list(loops[index])
         if len(local) < 3:
             continue
-        dense = resample_loop(local, max(ring, len(local)), cyclic=True)
+        # Follow the line as it is drawn: sampled between the points and put
+        # onto the model, the way the visible line is built. Sampling straight
+        # across the cut's plane instead cuts the corners between points, and
+        # on a rounded line those chords dip inside the model — leaving the
+        # lid short of its own boundary, and the cut unable to separate.
+        dense = []
+        for i, a in enumerate(resample_loop(local, max(ring, len(local)),
+                                            cyclic=True)):
+            world = matrix @ Vector((a.x, a.y, field.eval(a.x, a.y)))
+            ok, near, _normal, _index = model.closest_point_on_mesh(
+                to_model @ world)
+            if ok:
+                world = model.matrix_world @ near
+            dense.append(matrix.inverted() @ world)
         flat = [(p.x, p.y) for p in dense]
         centre = (sum(u for u, _v in flat) / len(flat),
                   sum(v for _u, v in flat) / len(flat))
-        verts = [bm.verts.new((u, v, 0.0)) for u, v in flat]
+        verts = [bm.verts.new((u, v, height))
+                 for (u, v), height in zip(flat, [p.z for p in dense])]
         hub = bm.verts.new((centre[0], centre[1], 0.0))
         for i, vert in enumerate(verts):
             try:
@@ -1375,8 +1389,9 @@ def cap_sheet(cut, target, usable, ring=96, relax=18, cuts=2,
                 continue
             neighbours = [edge.other_vert(vert) for edge in vert.link_edges]
             if neighbours:
-                moved[vert] = sum((n.co for n in neighbours), Vector()) \
+                average = sum((n.co for n in neighbours), Vector()) \
                     / len(neighbours)
+                moved[vert] = Vector((average.x, average.y, vert.co.z))
         for vert, target_co in moved.items():
             vert.co = vert.co.lerp(target_co, 0.5)
 
@@ -1388,6 +1403,8 @@ def cap_sheet(cut, target, usable, ring=96, relax=18, cuts=2,
                       "Draw it right round the part you want removed")
 
     for vert in bm.verts:
+        if vert in rim:
+            continue  # already on the line, where it was drawn
         u, v = vert.co.x, vert.co.y
         vert.co = Vector((u, v, field.eval(u, v)))
 
@@ -1464,9 +1481,44 @@ def find_join_hints(cut, target, ring=96):
         return stuck, []
 
     matrix = cut.matrix_world
+    diagonal = core.bbox_diagonal(target)
+    reach = diagonal * CAP_STEP_OUT * 2.0
+
+    # Material carrying on past the rim: the cut stops at the line, so
+    # anything solid just beyond it joins the two sides around the cut. This
+    # is the usual reason a line that looks right will not separate.
+    for vert in bm.verts:
+        if not vert.is_boundary:
+            continue
+        along = [edge.other_vert(vert) for edge in vert.link_edges
+                 if edge.is_boundary]
+        inward = [edge.other_vert(vert) for edge in vert.link_edges
+                  if not edge.is_boundary]
+        if len(along) < 2 or not inward:
+            continue
+        tangent = (along[1].co - along[0].co)
+        middle = sum((v.co for v in inward), Vector()) / len(inward)
+        outward = (vert.co - middle)
+        if tangent.length > 1e-9:
+            tangent.normalize()
+            outward = outward - tangent * outward.dot(tangent)
+        if outward.length < 1e-12:
+            continue
+        outward.normalize()
+        world = matrix @ vert.co
+        direction = (matrix.to_3x3() @ outward).normalized()
+        if core.point_inside(target, world + direction * reach):
+            stuck.append(world)
+
+    # The band along the rim is stepped out of the model deliberately, so only
+    # faces well inside the lid can be said to have left it.
+    edge_verts = {v for v in bm.verts if v.is_boundary}
+    for _ring in range(2):
+        edge_verts |= {edge.other_vert(v) for v in set(edge_verts)
+                       for edge in v.link_edges}
     holes = []
     for face in bm.faces:
-        if any(edge.is_boundary for edge in face.edges):
+        if any(vert in edge_verts for vert in face.verts):
             continue
         centre = matrix @ face.calc_center_median()
         if not core.point_inside(target, centre):

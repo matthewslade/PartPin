@@ -1676,6 +1676,49 @@ def scenario_draw_operator_registered(core):
           .keywords.get('default') is True)
 
 
+def scenario_lid_reaches_the_line(core):
+    """The surface that cuts must reach the line all the way round.
+
+    It used to be laid out straight across the cut's plane between the points,
+    which on a rounded line cuts the corners: the lid stopped short of its own
+    boundary and those chords dipped inside the model, so nothing separated.
+    """
+    print("Scenario: the cut surface reaches the drawn line")
+    reset_scene()
+    from part_pin import surface
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    # Few points around a round limb: the worst case for cutting corners.
+    cut = collar_cut(core, surface, model, per_loop=10)
+    diagonal = core.bbox_diagonal(model)
+
+    field = surface.field_for(cut)
+    matrix = cut.matrix_world
+    line = []
+    for loop in surface.control_loops(cut):
+        for i, a in enumerate(loop):
+            b = loop[(i + 1) % len(loop)]
+            for k in range(8):
+                t = k / 8.0
+                u, v = a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t
+                line.append(surface.project_to_surface(
+                    model, matrix @ Vector((u, v, field.eval(u, v)))))
+
+    tris = surface.cap_preview_tris(cut, model)
+    check("the lid is built", len(tris) >= 3, f"{len(tris) // 3} triangles")
+    corners = [Vector(p) for p in tris]
+    worst = max(min((p - q).length for q in corners) for p in line)
+    check("every point of the line is met by the lid",
+          worst < diagonal * 0.01,
+          f"furthest {worst:.4f} = {worst / diagonal * 100:.2f}% of the model")
+
+    # Which is what lets it cut with points this sparse.
+    pieces, joined, holes = surface.trial_cut(cut, model)
+    check("and it separates", pieces == 2,
+          f"{pieces} pieces, {len(joined)} red, {len(holes)} violet")
+
+
 def scenario_trial_cut(core):
     """Whether a cut separates is answered by trying it, and reasons are only
     shown when the answer is no — a cut surface often passes outside the model
@@ -1989,6 +2032,7 @@ def main():
     scenario_draw_then_adjust(core)
     scenario_draw_cut_rejections(core)
     scenario_draw_operator_registered(core)
+    scenario_lid_reaches_the_line(core)
     scenario_trial_cut(core)
     scenario_line_hugs_surface(core)
     scenario_cap_preview(core)
