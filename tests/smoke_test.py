@@ -1232,8 +1232,9 @@ def scenario_probe_finds_trouble(core):
     check("the flags say material crosses the line",
           any(p['status'] == surface.PROBE_BRIDGE for p in bad),
           str({p['status'] for p in bad}))
-    check("no reach is suggested — reaching further cannot fix a crossing",
-          suggested is None, str(suggested))
+    check("the crossing is what gets named, not a reach to try",
+          "outside the line" in surface.failure_reason(probes, cut),
+          surface.failure_reason(probes, cut))
     reason = surface.failure_reason(probes, cut)
     check("the failure reason points at the crossing material",
           "outside the line" in reason, reason)

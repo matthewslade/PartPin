@@ -103,6 +103,14 @@ Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
    line where the piece is welded on, since there is nowhere else to break
    out; that lands on the seam where the piece was.
 
+   To separate anything, a cut has to break out through the model's
+   surface all the way round your line. It does that by following the
+   model's own outward normal at the line — stepping out through the
+   surface, flaring slightly like a cone — rather than spreading sideways
+   in its own plane, which at a crease would head into the body instead of
+   out through the surface. That is what lets a line drawn in a crease,
+   such as an arm at the armpit, cut without touching what surrounds it.
+
    **Recessed pieces: Undercut.** Some pieces are held on by material
    outside the line — an arm sunk under a shoulder, or a mushroom stem
    under its cap. They cannot come away without cutting a little of what

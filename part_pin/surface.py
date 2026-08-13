@@ -928,7 +928,7 @@ def _patch_attempt(cut, target, field, polys, resolution, grow, pad):
     # Growth has to reach as far as the bite it is allowed, or widening the
     # bite would let the cut into material it never actually reaches.
     cell = max(min(du, dv), 1e-12)
-    keep = _dilate(keep, n, max(1, int(max(grow, bite) / cell + 0.5)),
+    keep = _dilate(keep, n, max(1, int(bite / cell + 0.5)) if bite else 1,
                    blocked=other_material)
 
     # Material being cut that reaches the edge of the extent means the piece
@@ -941,7 +941,7 @@ def _patch_attempt(cut, target, field, polys, resolution, grow, pad):
     # Growth has to reach as far as the bite it is allowed, or widening the
     # bite would let the cut into material it never actually reaches.
     cell = max(min(du, dv), 1e-12)
-    keep = _dilate(keep, n, max(1, int(max(grow, bite) / cell + 0.5)),
+    keep = _dilate(keep, n, max(1, int(bite / cell + 0.5)) if bite else 1,
                    blocked=other_material)
 
     nodes = [(u0 + du * i, v0 + dv * j)
@@ -950,7 +950,11 @@ def _patch_attempt(cut, target, field, polys, resolution, grow, pad):
     heights = [[flat[i * (n + 1) + j] for j in range(n + 1)]
                for i in range(n + 1)]
     thickness = max(core.bbox_diagonal(target) * SEAM_FACTOR, 1e-9)
-    return {'u0': u0, 'v0': v0, 'du': du, 'dv': dv, 'n': n,
+    # How far the rim is stepped out through the surface: just enough to clear
+    # the staircase the grid leaves between the mask and the line. Any more and
+    # it starts cutting into whatever happens to lie beside the piece.
+    flare = max(du, dv) * 1.5
+    return {'u0': u0, 'v0': v0, 'du': du, 'dv': dv, 'n': n, 'flare': flare,
             'keep': keep, 'material': inside, 'interior': interior,
             'beyond': other_material, 'heights': heights,
             'thickness': thickness}, spilled
@@ -996,6 +1000,44 @@ def patch_grid(cut, target, resolution, margin=None, indices=None,
             continue
         break
     return patch
+
+
+def flare_rim(bm, cut, target, distance):
+    """Push the slab's rim out through the model's surface.
+
+    To separate anything, the cut has to break out through the surface all
+    the way round its line. Growing it sideways in its own plane does that
+    on an open limb, but at a crease — an arm where it meets a shoulder —
+    sideways means straight into the body, which is not where the surface
+    is. Following the model's own outward normal at the rim steps out
+    through the surface instead, flaring the cut like a cone, and takes
+    almost nothing of what surrounds the piece.
+    """
+    rim = {v for face in bm.faces for v in face.verts
+           if any(edge.is_boundary for edge in v.link_edges)}
+    if not rim:
+        # A closed slab has no boundary edges, so pick the walls: their
+        # vertices are the ones shared by fewer than four faces.
+        rim = {v for v in bm.verts if len(v.link_faces) < 4}
+    if not rim:
+        return 0
+
+    model = evaluated(target)
+    to_model = model.matrix_world.inverted()
+    matrix = cut.matrix_world
+    inverse = matrix.inverted()
+    rotation = inverse.to_3x3()
+    moved = 0
+    for vert in rim:
+        world = matrix @ vert.co
+        ok, _location, normal, _index = model.closest_point_on_mesh(
+            to_model @ world)
+        if not ok or normal.length < 1e-9:
+            continue
+        outward = (model.matrix_world.to_3x3() @ normal).normalized()
+        vert.co = vert.co + (rotation @ outward) * distance
+        moved += 1
+    return moved
 
 
 def _patch_bm(patch, thickness=None):
@@ -1287,6 +1329,9 @@ def build_local_slab(cut, target, resolution=48, scene=None):
     if not bm.faces:
         bm.free()
         return None, "this cut covers no area of the model", warning
+    # Step the rim out through the surface rather than sideways into whatever
+    # the piece is joined to.
+    flare_rim(bm, cut, target, patch['flare'])
     obj = core.new_mesh_object("PartPin_Slab", bm, scene.collection,
                                matrix=cut.matrix_world.copy())
     obj.hide_render = True
