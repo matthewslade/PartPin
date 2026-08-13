@@ -533,8 +533,11 @@ class PARTPIN_OT_check_cut_line(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     fix: bpy.props.BoolProperty(
-        name="Fix Edge Margin",
-        description="Set Edge Margin to the value the line needs",
+        name="Fix",
+        description=(
+            "Set Undercut to reach through whatever is holding the piece on, "
+            "or Edge Margin when the cut simply needs more room"
+        ),
         default=False,
     )
 
@@ -556,12 +559,28 @@ class PARTPIN_OT_check_cut_line(bpy.types.Operator):
         if not bad:
             self.report({'INFO'}, summary)
             return {'FINISHED'}
-        if self.fix and suggested:
-            cut.pp_margin = suggested
-            self.report({'INFO'},
-                        f"Edge Margin set to {suggested:.3f} — {summary}")
-        else:
+
+        undercut = surface.suggest_undercut(probes, cut)
+        if not self.fix:
+            if undercut:
+                summary += (f". Undercut {undercut:.2f} would cut through what "
+                            "is holding the piece on")
             self.report({'WARNING'}, summary)
+            return {'FINISHED'}
+
+        if undercut:
+            cut.pp_undercut = undercut
+            self.report({'INFO'},
+                        f"Undercut set to {undercut:.2f}, enough to reach "
+                        "through what is holding the piece on")
+        elif suggested:
+            cut.pp_margin = suggested
+            self.report({'INFO'}, f"Edge Margin set to {suggested:.3f}")
+        else:
+            self.report({'WARNING'},
+                        summary + ". Nothing here can be fixed by reaching "
+                        "further — take the line around the material holding "
+                        "the piece on")
         return {'FINISHED'}
 
 

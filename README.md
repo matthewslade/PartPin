@@ -103,11 +103,22 @@ Works in **Blender 4.2+** on Windows, macOS and Linux. Requires a
    line where the piece is welded on, since there is nowhere else to break
    out; that lands on the seam where the piece was.
 
-   If something crosses your line — a strap, a fin, a spike joining the
-   piece to the model outside the line — the piece cannot come away
-   without cutting that too, which is outside your line. The cut says so
-   and marks the spots, rather than cutting it: take the line around it,
-   or move the line to where the piece is only attached inside it.
+   **Recessed pieces: Undercut.** Some pieces are held on by material
+   outside the line — an arm sunk under a shoulder, or a mushroom stem
+   under its cap. They cannot come away without cutting a little of what
+   holds them. *Undercut* is how far the cut may reach into the model
+   around the line to do that: red marks appear where the piece is still
+   joined, **Check Line** measures how deep that material goes, and
+   **Fix** sets Undercut to reach through it. What it costs is a thin band
+   on the seam where the piece was — in testing, one hundredth of one
+   percent of the model.
+
+   Undercut is 0 by default, so nothing outside your line is touched
+   unless you ask. If the material holding the piece runs deeper than a
+   seam-side nick can reach, the cut says so instead of eating into the
+   model: take the line around it, or move it to where the piece is only
+   attached inside the line — the mushroom comes off cleanly if you cut
+   across the stem rather than at the cap.
 
    **When a cut won't separate, the line shows you why.** Trouble spots
    are marked on the line as you work — amber where material carries on
@@ -171,6 +182,8 @@ step.
 - Trouble spots marked on the cut line when a cut cannot separate
 - Only material inside the line is cut: the rest of the model is left
   whole, however far the cut's plane would carry on
+- Undercut for recessed pieces: reach a measured, bounded distance into
+  what holds a piece on, with a one-click Fix that works out how far
 - Localized cuts: only the region ring-fenced by the cut line is severed,
   leaving the rest of the model whole
 - Built-in connector shapes plus custom connector meshes

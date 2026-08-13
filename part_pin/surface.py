@@ -338,16 +338,47 @@ def usable_loop_indices(cut):
     return indices
 
 
+# Beyond this, reaching into the model is no longer a nick around a seam.
+UNDERCUT_LIMIT = 0.6
+
+
+def suggest_undercut(probes, cut, resolution=None):
+    """The Undercut that would reach through the material holding the piece,
+    or None when that material runs too deep to cut into sensibly.
+
+    A couple of grid cells are added on top of the measured depth: the cut
+    grows in whole cells, so landing exactly on the measurement would stop a
+    hair short and separate nothing.
+    """
+    depths = [p['needed'] for p in probes if p['status'] == PROBE_BRIDGE]
+    if not depths or any(d == float('inf') for d in depths):
+        return None
+    settings = get_settings_safe()
+    if resolution is None:
+        resolution = settings.surface_resolution if settings else 48
+    cell = 2.6 / max(int(resolution), 8)
+    wanted = round(max(depths) * 1.05 + cell * 2.0 + 0.01, 3)
+    if wanted <= cut.pp_undercut or wanted > UNDERCUT_LIMIT:
+        return None
+    return wanted
+
+
 def failure_reason(probes, cut):
     """Why a cut that was expected to separate did not, in plain terms."""
     bad = [p for p in probes if p['status'] != PROBE_OK]
     bridges = sum(1 for p in bad if p['status'] == PROBE_BRIDGE)
     others = [p for p in bad if p['status'] != PROBE_BRIDGE]
     if bridges:
-        return (f"nothing came away — material outside the line still joins "
-                f"the piece at {bridges} spots along it. That material is left "
-                "whole on purpose, so take the line around it, or move the "
-                "line to where the piece is only attached inside it")
+        wanted = suggest_undercut(probes, cut)
+        remedy = (f"raise Undercut to about {wanted:.2f} to cut through it "
+                  "(Check Cut Line ▸ Fix does it), or take the line around it"
+                  if wanted else
+                  "that material runs too deep to cut into — take the line "
+                  "around it, or move the line to where the piece is only "
+                  "attached inside it")
+        return (f"nothing came away — the piece is still joined to the model "
+                f"outside the line at {bridges} spots along it (marked red). "
+                f"{remedy}")
     if others:
         kinds = {}
         for probe in others:
@@ -653,6 +684,24 @@ def _distance_to_loop(u, v, poly):
     return best
 
 
+def _closest_on_loop(u, v, poly):
+    """Nearest point on a closed 2D polygon, and the distance to it."""
+    best, best_distance = poly[0], float('inf')
+    count = len(poly)
+    for i in range(count):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % count]
+        dx, dy = x2 - x1, y2 - y1
+        length = dx * dx + dy * dy
+        t = 0.0 if length < 1e-18 else max(
+            0.0, min(1.0, ((u - x1) * dx + (v - y1) * dy) / length))
+        px, py = x1 + dx * t, y1 + dy * t
+        distance = ((u - px) ** 2 + (v - py) ** 2) ** 0.5
+        if distance < best_distance:
+            best, best_distance = (px, py), distance
+    return best, best_distance
+
+
 def inside_loops(u, v, polys, margin=0.0):
     """Inside any cut line, or within `margin` of one."""
     for poly in polys:
@@ -861,20 +910,25 @@ def _patch_attempt(cut, target, field, polys, resolution, grow, pad):
     # survive, so growth for breaking out through the surface stops at it and
     # otherwise spreads through empty space.
     #
-    # It is allowed a bite of a cell or so right at the line, though. Where a
-    # piece joins the model there is no empty space to break out into — an
-    # arm at the armpit is welded to the body along the line itself — so a
-    # cut that refuses to touch anything outside the line could never free
-    # it. The bite is bounded by the grid, lands on the seam where the piece
-    # was, and cannot reach the body of a neighbouring feature.
-    skin = max(du, dv) * 1.5
+    # It is allowed a bite right at the line, though. Where a piece joins the
+    # model there is no empty space to break out into — an arm at the armpit
+    # is welded to the body along the line itself — so a cut that refuses to
+    # touch anything outside the line could never free it. By default the
+    # bite is a cell or so, enough for a crease; Undercut widens it to free a
+    # piece that is recessed into the model. Either way it is a band along
+    # the line, so it lands on the seam and cannot carry off a whole feature.
+    span_uv = max(max(us) - min(us), max(vs) - min(vs), 1e-9)
+    bite = span_uv * cut.pp_undercut
+    skin = max(max(du, dv) * 1.5, bite)
     other_material = [
         [inside[i][j] and not interior[i][j]
          and not any(_distance_to_loop(*centres[i * n + j], poly) <= skin
                      for poly in dense)
          for j in range(n)] for i in range(n)]
+    # Growth has to reach as far as the bite it is allowed, or widening the
+    # bite would let the cut into material it never actually reaches.
     cell = max(min(du, dv), 1e-12)
-    keep = _dilate(keep, n, max(1, int(grow / cell + 0.5)),
+    keep = _dilate(keep, n, max(1, int(max(grow, bite) / cell + 0.5)),
                    blocked=other_material)
 
     # Material being cut that reaches the edge of the extent means the piece
@@ -884,8 +938,10 @@ def _patch_attempt(cut, target, field, polys, resolution, grow, pad):
                   for j in (0, n - 1)) or any(
         keep[i][j] for j in range(n) for i in (0, n - 1))
 
+    # Growth has to reach as far as the bite it is allowed, or widening the
+    # bite would let the cut into material it never actually reaches.
     cell = max(min(du, dv), 1e-12)
-    keep = _dilate(keep, n, max(1, int(grow / cell + 0.5)),
+    keep = _dilate(keep, n, max(1, int(max(grow, bite) / cell + 0.5)),
                    blocked=other_material)
 
     nodes = [(u0 + du * i, v0 + dv * j)
@@ -900,7 +956,8 @@ def _patch_attempt(cut, target, field, polys, resolution, grow, pad):
             'thickness': thickness}, spilled
 
 
-def patch_grid(cut, target, resolution, margin=None, indices=None):
+def patch_grid(cut, target, resolution, margin=None, indices=None,
+               pad_scale=1.0):
     """Grid over the cut, with a mask of the cells to actually cut.
 
     The mask is *where the cut surface runs through the model*, limited to
@@ -925,6 +982,7 @@ def patch_grid(cut, target, resolution, margin=None, indices=None):
     factor = cut.pp_margin if margin is None else margin
     grow = span * max(factor, 1e-4)
     pad = max(grow * 3.0, field.radius if not field.is_flat else grow)
+    pad *= max(pad_scale, 1.0)
 
     patch = None
     detail = max(int(resolution), 8)
@@ -1077,6 +1135,36 @@ def probe_cut_line(cut, target, resolution=None, per_loop=48):
     beyond = patch.get('beyond', None)
     results = []
 
+    # How deep the material outside the line goes, so a sensible Undercut can
+    # be suggested rather than guessed at. Measured by walking out through the
+    # material along the cut surface, which the grid's own extent would
+    # otherwise cut short and make the answer look bottomless.
+    polys = [[(p.x, p.y) for p in loops[i]] for i in indices]
+    us = [u for poly in polys for u, _v in poly]
+    vs = [v for poly in polys for _u, v in poly]
+    span_uv = max(max(us) - min(us), max(vs) - min(vs), 1e-9)
+    step = span_uv * 0.02
+    limit = span_uv * 1.5
+
+    def depth_at(u, v):
+        """How much further the material here runs, away from the line."""
+        nearest, distance = min(
+            (_closest_on_loop(u, v, poly) for poly in polys),
+            key=lambda found: found[1])
+        dx, dy = u - nearest[0], v - nearest[1]
+        length = (dx * dx + dy * dy) ** 0.5
+        if length < 1e-12:
+            return 0.0
+        dx, dy = dx / length, dy / length
+        travelled = distance
+        while travelled <= limit:
+            px, py = nearest[0] + dx * travelled, nearest[1] + dy * travelled
+            if not core.point_inside(
+                    target, matrix @ Vector((px, py, field.eval(px, py)))):
+                return travelled / span_uv
+            travelled += step
+        return float('inf')
+
     # Material that crosses the line: it lies beyond the line, so the cut
     # leaves it alone, yet it is right against the region being cut and will
     # hold the piece on. This is the usual reason a line that looks right
@@ -1097,7 +1185,8 @@ def probe_cut_line(cut, target, resolution=None, per_loop=48):
                     'position': world_of(u0 + du * (i + 0.5),
                                          v0 + dv * (j + 0.5)),
                     'status': PROBE_BRIDGE,
-                    'needed': 0.0,
+                    'needed': depth_at(u0 + du * (i + 0.5),
+                                       v0 + dv * (j + 0.5)),
                 })
 
     # The region being cut running off the edge of the cut's own reach.

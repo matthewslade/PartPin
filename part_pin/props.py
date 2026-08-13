@@ -274,6 +274,19 @@ def register():
         min=0.001,
         max=0.5,
     )
+    bpy.types.Object.pp_undercut = FloatProperty(
+        name="Undercut",
+        description=(
+            "How far the cut may reach into the model around the line, as a "
+            "fraction of the line's size. Raise it to free a piece that is "
+            "recessed into the model — an arm buried under a shoulder — "
+            "which cannot come away without cutting a little of what holds "
+            "it. Leave at 0 to keep the cut to the line"
+        ),
+        default=0.0,
+        min=0.0,
+        max=0.5,
+    )
     bpy.types.Object.pp_falloff = FloatProperty(
         name="Falloff",
         description=(
@@ -296,6 +309,6 @@ def unregister():
     for attr in (
         "pp_role", "pp_cut_kind", "pp_index", "pp_enabled",
         "pp_shape", "pp_clearance", "pp_pin_flip",
-        "pp_local", "pp_margin", "pp_main_loop",
+        "pp_local", "pp_margin", "pp_main_loop", "pp_undercut",
     ):
         delattr(bpy.types.Object, attr)

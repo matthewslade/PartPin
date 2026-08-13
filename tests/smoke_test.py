@@ -1363,6 +1363,90 @@ def scenario_arm_at_shoulder(core):
           arm_lo.z > 0.5, f"arm starts at z {arm_lo.z:.2f}")
 
 
+def scenario_undercut_frees_recessed_piece(core):
+    """Issue #4: a piece held on by material outside the line — an arm
+    recessed under a shoulder — cannot come away without cutting a little of
+    what holds it. Undercut allows exactly that, bounded, and Check Cut Line
+    ▸ Fix works out how much."""
+    print("Scenario: Undercut frees a recessed piece (issue #4)")
+    reset_scene()
+    from part_pin import surface
+    s = bpy.context.scene.part_pin
+    model = make_limb_with_fin(core)
+    s.target = model
+    before = volume(model)
+    cut = collar_cut(core, surface, model)
+    bpy.context.view_layer.objects.active = cut
+
+    check("Undercut is off by default", cut.pp_undercut == 0.0,
+          f"{cut.pp_undercut}")
+    failures = []
+    parts, _applied, _warns = core.create_parts(
+        bpy.context, model, [cut], keep_original=True, failures=failures)
+    check("by default it will not cut what holds the piece",
+          len(parts) == 1 and failures, f"{len(parts)} parts, {failures}")
+    for part in list(parts):
+        core.remove_object(part)
+
+    probes = surface.probe_cut_line(cut, model)
+    wanted = surface.suggest_undercut(probes, cut)
+    check("an Undercut is suggested",
+          wanted and 0.0 < wanted <= surface.UNDERCUT_LIMIT, str(wanted))
+    check("the reason offers it",
+          "Undercut" in surface.failure_reason(probes, cut),
+          surface.failure_reason(probes, cut))
+
+    bpy.ops.partpin.check_cut_line(fix=True)
+    check("Fix sets the Undercut", cut.pp_undercut > 0.0,
+          f"{cut.pp_undercut:.3f}")
+
+    failures = []
+    parts, _applied, _warns = core.create_parts(
+        bpy.context, model, [cut], keep_original=True, failures=failures)
+    check("the recessed piece now comes away", len(parts) == 2,
+          f"got {len(parts)}: {failures}")
+    for p in parts:
+        check(f"part closed: {p.name}", is_closed(core, p))
+    if len(parts) != 2:
+        return
+    lost = before - sum(volume(p) for p in parts)
+    check("only a sliver is spent freeing it", 0.0 <= lost < before * 0.01,
+          f"lost {lost:.4f} of {before:.3f} ({100 * lost / before:.2f}%)")
+    check("the rest of the model is still whole",
+          max(volume(p) for p in parts) > before * 0.4,
+          f"{max(volume(p) for p in parts):.3f} of {before:.3f}")
+
+
+def scenario_undercut_declines_when_too_deep(core):
+    """When what holds the piece runs deeper than a seam-side nick, no
+    Undercut is sensible — say so rather than eating into the model."""
+    print("Scenario: Undercut declines when the join runs deep")
+    reset_scene()
+    from part_pin import surface
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    # The line dropped onto solid material: the piece is joined outside it
+    # all the way round, and no bounded reach can free that.
+    cut = collar_cut(core, surface, model)
+    points = []
+    for point in cut.pp_points:
+        world = cut.matrix_world @ Vector(point.co)
+        points.append(cut.matrix_world.inverted() @ (world * 0.35))
+    surface.store_control_points(cut, points, [0] * len(points))
+    bpy.context.view_layer.objects.active = cut
+
+    probes = surface.probe_cut_line(cut, model)
+    wanted = surface.suggest_undercut(probes, cut)
+    check("no runaway Undercut is suggested",
+          wanted is None or wanted <= surface.UNDERCUT_LIMIT, str(wanted))
+    before = cut.pp_undercut
+    bpy.ops.partpin.check_cut_line(fix=True)
+    check("Fix never exceeds the limit",
+          cut.pp_undercut <= surface.UNDERCUT_LIMIT,
+          f"{before} → {cut.pp_undercut}")
+
+
 def scenario_material_across_line_blocks(core):
     """A fin crossing the line joins the piece to the model outside the line.
     Freeing it would mean cutting outside the line, which is the one thing
@@ -1840,6 +1924,8 @@ def main():
     scenario_collar_plus_leftover_line(core)
     scenario_probe_finds_trouble(core)
     scenario_arm_at_shoulder(core)
+    scenario_undercut_frees_recessed_piece(core)
+    scenario_undercut_declines_when_too_deep(core)
     scenario_material_across_line_blocks(core)
     scenario_overhang_outside_line_survives(core)
     scenario_check_operator(core)
