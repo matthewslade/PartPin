@@ -45,6 +45,7 @@ BAND_LADDER = (0.0015, 0.003, 0.006, 0.012, 0.024)
 APART = 'APART'            # the seam came apart at the spots reported
 UNENCLOSED = 'UNENCLOSED'  # the line does not ring-fence anything
 UNCAPPED = 'UNCAPPED'      # it parted, but the halves would not close up
+BUSY = 'BUSY'              # Blender would not run the cut at all just then
 
 # Marks the band's faces so they can be told from the model's after the
 # intersect has rebuilt the mesh around them.
@@ -161,6 +162,11 @@ def _work_object(obj, rings, normals, heights, scene):
     return work
 
 
+class CutterBusy(RuntimeError):
+    """Blender would not let the cut run — a context problem, not a geometry
+    one. Worth telling apart: the line is not what needs changing."""
+
+
 def _uniform(rings, height):
     return [[height] * len(ring) for ring in rings]
 
@@ -226,21 +232,37 @@ def _cut_surface(obj, rings, normals, heights, scene):
     """
     work = _work_object(obj, rings, normals, heights, scene)
     view_layer = bpy.context.view_layer
+
+    # Whatever was active has to be in object mode before anything else is
+    # made active, or the mode switch below refuses and the cut comes back
+    # looking like a geometry failure. Drawing a cut leaves the cut object
+    # active, which is how pressing Create Parts straight afterwards could
+    # fail and then work on a second press.
+    active = view_layer.objects.active
+    if active is not None and active.mode != 'OBJECT':
+        try:
+            bpy.ops.object.mode_set(mode='OBJECT')
+        except RuntimeError:
+            pass
     for other in list(bpy.context.selected_objects):
         other.select_set(False)
     work.select_set(True)
     view_layer.objects.active = work
     bpy.context.tool_settings.mesh_select_mode = (False, False, True)
 
-    bpy.ops.object.mode_set(mode='EDIT')
     try:
+        bpy.ops.object.mode_set(mode='EDIT')
         bpy.ops.mesh.intersect(mode='SELECT_UNSELECT', separate_mode='NONE',
                                solver='EXACT')
-    except RuntimeError:
-        return None, []
+    except RuntimeError as exc:
+        core.remove_object(work)
+        raise CutterBusy(str(exc))
     finally:
-        if work.mode != 'OBJECT':
-            bpy.ops.object.mode_set(mode='OBJECT')
+        if work.name in bpy.data.objects and work.mode != 'OBJECT':
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except RuntimeError:
+                pass
 
     bm = bmesh.new()
     bm.from_mesh(work.data)
@@ -732,6 +754,10 @@ def cut_object(obj, rings, normals, normal, scene, collection=None,
     carried through — world positions, for marking on the model.
     """
     collection = collection or scene.collection
+    # Everything below reads the *evaluated* mesh, and an object made a moment
+    # ago has no evaluated form until the depsgraph catches up. Without this,
+    # the first cut after drawing one can be measured against nothing.
+    bpy.context.view_layer.update()
     diagonal = core.bbox_diagonal(obj)
     spots, trouble = [], APART
     # What the model arrives with. A cut is judged on leaving it no worse, not
@@ -758,6 +784,10 @@ def cut_object(obj, rings, normals, normal, scene, collection=None,
     for heights in attempts():
         try:
             found, loose = _cut_surface(obj, rings, normals, heights, scene)
+        except CutterBusy:
+            # Nothing about the line will fix this, and trying every rung
+            # against a context that will not have it wastes a minute.
+            return None, BUSY, []
         except Exception:
             found, loose = None, []
         if found is None:

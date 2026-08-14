@@ -740,6 +740,9 @@ def create_parts(context, target, cuts, keep_original=True, part_gap=0.0,
     base.pp_role = ROLE_PART
     base.hide_render = False
     parts = [base]
+    # The copy has no evaluated form until the depsgraph catches up, and the
+    # cutter works from the evaluated mesh.
+    context.view_layer.update()
 
     from . import surface  # local import: surface.py builds on this module
 

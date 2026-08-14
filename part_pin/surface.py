@@ -363,6 +363,10 @@ def failure_reason(spots, trouble=None):
     """
     from . import mesh_cut  # local import: mesh_cut builds on this module
 
+    if trouble == mesh_cut.BUSY:
+        return ("the cut could not be run just then — Blender was busy with "
+                "something else. Click Create Parts again; nothing about the "
+                "line needs changing")
     if trouble == mesh_cut.UNENCLOSED:
         return ("nothing came away — this line does not ring-fence a piece of "
                 "the model. It has to go right round the part you want "
