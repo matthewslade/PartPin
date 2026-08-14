@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "part_pin"
-version = "1.14.0"
+version = "1.15.0"
 name = "PartPin"
 tagline = "Split models into printable parts with pin connectors"
 maintainer = "PartPin contributors"
