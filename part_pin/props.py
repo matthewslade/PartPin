@@ -132,10 +132,11 @@ class PartPinSettings(bpy.types.PropertyGroup):
     handle_points: IntProperty(
         name="Points",
         description=(
-            "How many draggable points to place around each cut line when "
-            "surface editing starts"
+            "How many draggable points to place around each cut line. Corners "
+            "always get one, so this is a guide rather than a rule — more of "
+            "them follow a drawn line more closely and give finer control"
         ),
-        default=16,
+        default=32,
         min=3,
         max=96,
     )

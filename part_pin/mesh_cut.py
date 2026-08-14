@@ -43,6 +43,14 @@ BAND_LADDER = (0.0015, 0.003, 0.006, 0.012, 0.024)
 # intersect has rebuilt the mesh around them.
 BAND_TAG = "pp_band"
 
+# How much taller the band is made where a seam came apart, and how far along
+# the line that reaches, in multiples of the spacing between samples. A seam
+# only ever fails locally — at one crease the band could not bridge — so the
+# repair is local too: raising the whole band instead is what makes it reach
+# through a thin fin somewhere else entirely.
+REPAIR_BOOST = 8.0
+REPAIR_REACH = 5.0
+
 # Passes of averaging along the ring's normals. At a crease the two sides
 # disagree by the whole angle of it, and a band built on the raw normals folds
 # there instead of bending; averaged, it leans along the bisector and crosses
@@ -75,7 +83,7 @@ def ring_normals(ring, target, smoothing=NORMAL_SMOOTHING):
     return normals
 
 
-def _work_object(obj, rings, normals, height, scene):
+def _work_object(obj, rings, normals, heights, scene):
     """The object's mesh with a band standing along each ring, ready to cut.
 
     The model's faces are left selected and the band's are not, because
@@ -103,9 +111,11 @@ def _work_object(obj, rings, normals, height, scene):
 
     # One band per line: a cut can have several, and every one of them has to
     # be cut for the piece they ring-fence between them to come away.
-    for ring, along in zip(rings, normals):
-        outer = [bm.verts.new(p + n * height) for p, n in zip(ring, along)]
-        inner = [bm.verts.new(p - n * height) for p, n in zip(ring, along)]
+    for ring, along, tall in zip(rings, normals, heights):
+        outer = [bm.verts.new(p + n * h)
+                 for p, n, h in zip(ring, along, tall)]
+        inner = [bm.verts.new(p - n * h)
+                 for p, n, h in zip(ring, along, tall)]
         for i in range(len(ring)):
             j = (i + 1) % len(ring)
             # Triangles, not quads: a quad spanning a bend in the line is not
@@ -140,6 +150,36 @@ def _work_object(obj, rings, normals, height, scene):
     return work
 
 
+def _uniform(rings, height):
+    return [[height] * len(ring) for ring in rings]
+
+
+def _repaired(rings, heights, spots):
+    """The same band, stood taller where the seam came apart.
+
+    Returns None if nothing needed raising.
+    """
+    if not spots:
+        return None
+    raised, touched = [], False
+    for ring, tall in zip(rings, heights):
+        spacing = surface.loop_length(ring) / max(len(ring), 1)
+        reach = spacing * REPAIR_REACH
+        along = []
+        for point, height in zip(ring, tall):
+            near = min((point - spot).length for spot in spots)
+            if near >= reach:
+                along.append(height)
+                continue
+            # Tallest right at the trouble, tapering back to the band's own
+            # height, so the join between the two is not a step.
+            lean = 1.0 - near / reach
+            along.append(height * (1.0 + (REPAIR_BOOST - 1.0) * lean))
+            touched = True
+        raised.append(along)
+    return raised if touched else None
+
+
 def _regions(bm, layer, seam):
     """The model's faces grouped into what the seam separates them into."""
     seen, groups = set(), []
@@ -163,7 +203,7 @@ def _regions(bm, layer, seam):
     return groups
 
 
-def _cut_surface(obj, rings, normals, height, scene):
+def _cut_surface(obj, rings, normals, heights, scene):
     """Cut the object's faces along the lines.
 
     Returns ((bmesh, layer, seam), loose ends). The first is None unless the
@@ -172,7 +212,7 @@ def _cut_surface(obj, rings, normals, height, scene):
     loose ends are where it did not, in world space, which is exactly where
     the line needs moving.
     """
-    work = _work_object(obj, rings, normals, height, scene)
+    work = _work_object(obj, rings, normals, heights, scene)
     view_layer = bpy.context.view_layer
     for other in list(bpy.context.selected_objects):
         other.select_set(False)
@@ -675,17 +715,29 @@ def cut_object(obj, rings, normals, normal, scene, collection=None,
     carried through — world positions, for marking on the model.
     """
     collection = collection or scene.collection
+    diagonal = core.bbox_diagonal(obj)
     spots = []
-    for height in BAND_LADDER:
+
+    def attempts():
+        """Bands to try, in order: the plain ladder, then the ladder again
+        with the band stood taller wherever the first pass came apart."""
+        for height in BAND_LADDER:
+            yield _uniform(rings, diagonal * height)
+        for height in BAND_LADDER:
+            mended = _repaired(rings, _uniform(rings, diagonal * height),
+                               spots)
+            if mended is not None:
+                yield mended
+
+    for heights in attempts():
         try:
-            found, loose = _cut_surface(obj, rings, normals,
-                                        core.bbox_diagonal(obj) * height,
-                                        scene)
+            found, loose = _cut_surface(obj, rings, normals, heights, scene)
         except Exception:
             found, loose = None, []
         if found is None:
             # Keep the closest thing to a working cut any rung managed, since
-            # that is the most useful account of where the trouble is.
+            # that is the most useful account of where the trouble is, and
+            # what the repair pass stands the band taller around.
             if loose and (not spots or len(loose) < len(spots)):
                 spots = loose
             continue

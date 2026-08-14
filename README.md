@@ -96,7 +96,10 @@ not.
 
 Red marks come from actually trying the cut — pressing **T**, or Create Parts
 failing — so they show where it really got stuck rather than where it might.
-They clear the moment the cut works.
+They clear the moment the cut works. Before you see any, the cut has already
+tried to mend itself: a seam only ever comes apart at one awkward spot, so the
+cutter goes back over those spots with more to work with and tries again. What
+is left in red is what that could not fix.
 
 Press **T** at any point for a straight answer: *"This cut separates into 2
 parts"*, or what is stopping it.
@@ -156,7 +159,7 @@ where it crosses, because that is what drawing the line over it asks for.
 
 | Setting | What it does |
 | --- | --- |
-| **Points** | How many draggable points a new line gets. Corners always get one, so the count is a guide rather than a rule |
+| **Points** | How many draggable points a new line gets (32). Corners always get one, so the count is a guide rather than a rule. More follow a drawn line more closely; fewer are easier to shove about |
 | **Cut Detail** | How finely the cut surface is built. Higher follows the line more closely; lower is steadier on an awkward line, where a fine surface is likelier to fold |
 | **Line Lift** | How far above the surface the line is drawn, so the surface cannot swallow it. Drawing only — the cut does not move |
 | **Undercut** | How far the cut may reach into the model around the line, to free a recessed piece. 0 by default |

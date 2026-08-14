@@ -1977,6 +1977,74 @@ def scenario_parts_can_be_cut_again(core):
               f"{sum(volume(p) for p in made):.4f} vs {before:.4f}")
 
 
+def scenario_a_seam_repairs_itself(core):
+    """A seam that comes apart is mended where it came apart.
+
+    A band only ever fails locally, at one crease it could not bridge. Raising
+    the whole band to cover that is what makes it reach through a thin fin
+    somewhere else entirely, so the repair stands it taller only around the
+    loose ends and leaves the rest alone.
+    """
+    print("Scenario: a seam that comes apart is mended where it broke")
+    from part_pin import mesh_cut, surface
+
+    def mend(label, model, cut):
+        rings, normals, _normal, _settle = surface.line_rings(cut, model)
+        thin = core.bbox_diagonal(model) * mesh_cut.BAND_LADDER[0]
+        flat = mesh_cut._uniform(rings, thin)
+        work = core.duplicate_object(model, "Probe",
+                                     bpy.context.scene.collection)
+        found, loose = mesh_cut._cut_surface(work, rings, normals, flat,
+                                             bpy.context.scene)
+        core.remove_object(work)
+        if found is not None:
+            found[0].free()
+            check(f"{label}: the thin band was meant to fail", False)
+            return
+        check(f"{label}: a band this thin comes apart", len(loose) > 0,
+              f"{len(loose)} loose ends")
+
+        mended = mesh_cut._repaired(rings, flat, loose)
+        check(f"{label}: the repair raises the band", mended is not None)
+        if mended is None:
+            return
+        # Only around the trouble: most of the line is left as it was.
+        raised = sum(1 for ring in mended for h in ring if h > thin * 1.01)
+        total = sum(len(ring) for ring in mended)
+        check(f"{label}: and only around the trouble", raised < total * 0.5,
+              f"{raised} of {total} samples raised")
+
+        work = core.duplicate_object(model, "Probe",
+                                     bpy.context.scene.collection)
+        found, still = mesh_cut._cut_surface(work, rings, normals, mended,
+                                             bpy.context.scene)
+        core.remove_object(work)
+        check(f"{label}: and the seam closes", found is not None,
+              f"{len(still)} loose ends left")
+        if found is not None:
+            found[0].free()
+
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_cube_model(core)
+    s.target = model
+    cut, _error = surface.cut_from_stroke(bpy.context, model,
+                                          waist_stroke(surface, model),
+                                          per_loop=16)
+    if cut is not None:
+        mend("cube corners", model, cut)
+
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model, base, axis = make_shoulder_arm(core)
+    s.target = model
+    stroke = collar_stroke(surface, model, base + axis * 0.55, axis)
+    cut, _error = surface.cut_from_stroke(bpy.context, model, stroke,
+                                          per_loop=18)
+    if cut is not None:
+        mend("armpit crease", model, cut)
+
+
 def scenario_a_failed_cut_stays_put(core):
     """A cut that fails has to still be there, with the trouble marked.
 
@@ -2438,6 +2506,7 @@ def main():
     scenario_trial_cut(core)
     scenario_seam_lands_on_the_line(core)
     scenario_parts_can_be_cut_again(core)
+    scenario_a_seam_repairs_itself(core)
     scenario_a_failed_cut_stays_put(core)
     scenario_line_hugs_surface(core)
     scenario_cap_preview(core)
