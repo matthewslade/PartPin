@@ -2072,6 +2072,25 @@ def scenario_a_failed_cut_stays_put(core):
     check("the reason counts them", "2 spot" in reason, reason)
     check("and says where to look", "Edit Cut on Surface" in reason, reason)
 
+    # Three things stop a cut and they want different things of the user, so
+    # they must never be described with the same sentence.
+    from part_pin import mesh_cut
+    said = {
+        "came apart": surface.failure_reason(spots, mesh_cut.APART),
+        "encloses nothing": surface.failure_reason([], mesh_cut.UNENCLOSED),
+        "would not close up": surface.failure_reason([], mesh_cut.UNCAPPED),
+    }
+    check("each way of failing reads differently",
+          len(set(said.values())) == 3, str(list(said)))
+    check("only the one about spots counts spots",
+          "spot(s)" not in said["encloses nothing"]
+          and "spot(s)" not in said["would not close up"],
+          str(said))
+    check("the one about enclosing says to go right round",
+          "right round" in said["encloses nothing"], said["encloses nothing"])
+    check("the one about closing up blames the turns, not the line's place",
+          "turns" in said["would not close up"], said["would not close up"])
+
     # A cut that works clears them: marks left over from a failure would sit
     # on the model claiming a working cut is broken.
     pieces, left = surface.trial_cut(cut, model)

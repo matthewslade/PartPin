@@ -39,6 +39,13 @@ from . import core, surface
 # cost of reaching further into the model.
 BAND_LADDER = (0.0015, 0.003, 0.006, 0.012, 0.024)
 
+# What went wrong, when a cut will not go through. Kept apart because they
+# want completely different things of the user, and one message covering all
+# three tells two thirds of them the wrong thing.
+APART = 'APART'            # the seam came apart at the spots reported
+UNENCLOSED = 'UNENCLOSED'  # the line does not ring-fence anything
+UNCAPPED = 'UNCAPPED'      # it parted, but the halves would not close up
+
 # Marks the band's faces so they can be told from the model's after the
 # intersect has rebuilt the mesh around them.
 BAND_TAG = "pp_band"
@@ -50,6 +57,10 @@ BAND_TAG = "pp_band"
 # through a thin fin somewhere else entirely.
 REPAIR_BOOST = 8.0
 REPAIR_REACH = 5.0
+# Rounds of repair. Each one works from where the *last* attempt came apart,
+# not where the first did, and reaches further and stands taller than the one
+# before — a crease that shrugged off one go may still give way to three.
+REPAIR_ROUNDS = 3
 
 # Passes of averaging along the ring's normals. At a crease the two sides
 # disagree by the whole angle of it, and a band built on the raw normals folds
@@ -154,17 +165,18 @@ def _uniform(rings, height):
     return [[height] * len(ring) for ring in rings]
 
 
-def _repaired(rings, heights, spots):
+def _repaired(rings, heights, spots, round_no=0):
     """The same band, stood taller where the seam came apart.
 
     Returns None if nothing needed raising.
     """
     if not spots:
         return None
+    boost = REPAIR_BOOST * (round_no + 1)
     raised, touched = [], False
     for ring, tall in zip(rings, heights):
         spacing = surface.loop_length(ring) / max(len(ring), 1)
-        reach = spacing * REPAIR_REACH
+        reach = spacing * REPAIR_REACH * (round_no + 1)
         along = []
         for point, height in zip(ring, tall):
             near = min((point - spot).length for spot in spots)
@@ -174,7 +186,7 @@ def _repaired(rings, heights, spots):
             # Tallest right at the trouble, tapering back to the band's own
             # height, so the join between the two is not a step.
             lean = 1.0 - near / reach
-            along.append(height * (1.0 + (REPAIR_BOOST - 1.0) * lean))
+            along.append(height * (1.0 + (boost - 1.0) * lean))
             touched = True
         raised.append(along)
     return raised if touched else None
@@ -716,18 +728,23 @@ def cut_object(obj, rings, normals, normal, scene, collection=None,
     """
     collection = collection or scene.collection
     diagonal = core.bbox_diagonal(obj)
-    spots = []
+    spots, trouble = [], APART
 
     def attempts():
-        """Bands to try, in order: the plain ladder, then the ladder again
-        with the band stood taller wherever the first pass came apart."""
+        """Bands to try: the plain ladder first, then rounds of it mended
+        wherever the attempts so far came apart."""
         for height in BAND_LADDER:
             yield _uniform(rings, diagonal * height)
-        for height in BAND_LADDER:
-            mended = _repaired(rings, _uniform(rings, diagonal * height),
-                               spots)
-            if mended is not None:
-                yield mended
+        for round_no in range(REPAIR_ROUNDS):
+            mended_any = False
+            for height in BAND_LADDER:
+                mended = _repaired(rings, _uniform(rings, diagonal * height),
+                                   spots, round_no)
+                if mended is not None:
+                    mended_any = True
+                    yield mended
+            if not mended_any:
+                return  # nothing came apart, so there is nothing to mend
 
     for heights in attempts():
         try:
@@ -735,17 +752,20 @@ def cut_object(obj, rings, normals, normal, scene, collection=None,
         except Exception:
             found, loose = None, []
         if found is None:
-            # Keep the closest thing to a working cut any rung managed, since
+            # Keep the closest thing to a working cut anything managed, since
             # that is the most useful account of where the trouble is, and
-            # what the repair pass stands the band taller around.
+            # what the next round of repair stands the band taller around.
             if loose and (not spots or len(loose) < len(spots)):
-                spots = loose
+                spots, trouble = loose, APART
+            elif not loose and not spots:
+                trouble = UNENCLOSED
             continue
         bm, layer, seam = found
         try:
             pieces = _part_and_cap(bm, layer, seam, normal, scene,
                                    collection, settle)
         except Exception:
+            trouble = UNCAPPED
             continue
         # A rung is only accepted on the evidence that it worked: the model
         # in pieces, every one of them closed. Anything else and the band
@@ -753,9 +773,12 @@ def cut_object(obj, rings, normals, normal, scene, collection=None,
         if len(pieces) >= 2 and all(core.mesh_issues(p) == (0, 0)
                                     for p in pieces):
             return pieces, None, []
+        # It parted but would not close up: that is the cap's doing, not the
+        # line's, and saying "your line encloses nothing" would be a lie.
+        trouble = UNCAPPED
         for piece in pieces:
             core.remove_object(piece)
-    return None, "the line could not be cut into the model's surface", spots
+    return None, trouble, spots
 
 
 def line_rings(cut, target):

@@ -618,7 +618,8 @@ class PARTPIN_OT_check_cut_line(bpy.types.Operator):
                         f"Cut '{cut.name}' separates into {pieces} parts")
             return {'FINISHED'}
         self.report({'WARNING'},
-                    f"Cut '{cut.name}': {surface.failure_reason(spots)}")
+                    f"Cut '{cut.name}': "
+                    f"{surface.failure_reason(spots, surface.WHY.get(cut.name))}")
         return {'FINISHED'}
 
 

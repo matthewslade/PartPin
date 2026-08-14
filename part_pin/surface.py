@@ -355,15 +355,32 @@ def line_rings(cut, target):
     return mesh_cut.line_rings(cut, target)
 
 
-def failure_reason(spots):
-    """Why a cut did not separate anything, given where it got stuck."""
+def failure_reason(spots, trouble=None):
+    """Why a cut did not separate anything, given what went wrong and where.
+
+    Three different things stop a cut, and they want completely different
+    things of you, so they are never described with the same sentence.
+    """
+    from . import mesh_cut  # local import: mesh_cut builds on this module
+
+    if trouble == mesh_cut.UNENCLOSED:
+        return ("nothing came away — this line does not ring-fence a piece of "
+                "the model. It has to go right round the part you want "
+                "removed, and come back to where it started")
+    if trouble == mesh_cut.UNCAPPED:
+        return ("nothing came away — the line cut the surface cleanly but the "
+                "two halves would not close up over it, which happens where a "
+                "line doubles back sharply on itself. Smooth out the tightest "
+                "turns in it, or take it a wider way round")
     if spots:
         return (f"nothing came away — the line could not be cut into the "
-                f"model's surface at {len(spots)} spot(s) along it. Open Edit "
-                "Cut on Surface: they are marked in red on the model. Move the "
-                "line off the crease there, or take it a shorter way round")
-    return ("nothing came away — this line does not ring-fence a piece of the "
-            "model. Draw it right round the part you want removed")
+                f"model's surface at {len(spots)} spot(s) along it, and "
+                "raising the cut around them did not free it either. Open "
+                "Edit Cut on Surface: they are marked in red. Move the line "
+                "off the crease there, or take it a shorter way round")
+    return ("nothing came away — the line could not be cut into this model's "
+            "surface, and nothing along it stands out as the reason. Try "
+            "moving the line onto a smoother stretch")
 
 
 def cut_line_problem(cut, minimum_roundness=0.02):
@@ -908,6 +925,10 @@ def cap_sheet(cut, target, usable, ring=96, relax=18, cuts=2,
 STUCK_AT = {}
 
 
+# Why each cut last failed, alongside where. Transient, like STUCK_AT.
+WHY = {}
+
+
 def remember_stuck(cut, spots):
     """Record where a cut got stuck, for the editor to mark."""
     if spots:
@@ -1118,7 +1139,7 @@ def trial_cut(cut, target, scene=None):
     trial.hide_render = True
     pieces, spots = 1, []
     try:
-        cut_pieces, _problem, spots = mesh_cut.cut_object(
+        cut_pieces, trouble, spots = mesh_cut.cut_object(
             trial, rings, normals, normal, scene, settle=settle)
         if cut_pieces is not None:
             pieces = len(cut_pieces)
@@ -1130,8 +1151,9 @@ def trial_cut(cut, target, scene=None):
         core.remove_object(trial)
 
     if pieces >= 2:
-        spots = []
+        spots, trouble = [], None
     remember_stuck(cut, spots)
+    WHY[cut.name] = trouble
     return pieces, spots
 
 
