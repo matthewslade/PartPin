@@ -197,9 +197,17 @@ piece than the line asks for, which you can trim afterwards.
 
 ## Working on this
 
-See [docs/NEXT-mesh-surgery-cutter.md](docs/NEXT-mesh-surgery-cutter.md) for how
-the cutter works, what was measured on the way to it, what has already been
-tried and rejected, and what is still left to clear out behind it.
+The **cut line** is being rebuilt — see
+[docs/NEXT-geodesic-cut-line.md](docs/NEXT-geodesic-cut-line.md). It is stored
+as a height field over a fitted plane, which cannot hold a contour that wraps
+round anything: the line sags away from its own points between them, and where
+it cannot express what was drawn it doubles back on itself. That is measured,
+and it is the cause of most of what is awkward about the tool.
+
+[docs/NEXT-mesh-surgery-cutter.md](docs/NEXT-mesh-surgery-cutter.md) covers the
+cutter itself — how it works, what was measured on the way to it, and what is
+still left to clear out behind it. The cutter is sound; the line it is given is
+the problem.
 
 ## Limits worth knowing
 
