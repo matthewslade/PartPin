@@ -36,21 +36,44 @@ def bridge_points(target, start, end, step):
 
     Letting go to orbit and drawing again leaves a gap. Joining the two ends
     with a straight line in space would leave the perimeter cutting through
-    the model, so the join is walked across the surface instead — which on a
-    cube means following its faces round the corner.
+    the model, so the join is put onto the surface instead — which on a cube
+    means following its faces round the corner.
+
+    Putting a straight line onto the surface is not the same as walking along
+    it, though. Where the line passes through the model, one step can land on
+    the near side and the next on the far side, and in between the walk
+    **doubles back on itself**: it runs out, returns, and sets off again a
+    hair away from where it has already been. That is a hairpin, and a hairpin
+    is the one shape of line that cannot be cut at all — the two sides of it
+    are too close together to cut between, and no amount of retrying helps.
+
+    So only steps that get further along the join are kept. Progress is
+    measured along the straight line between the two ends, not by distance to
+    the far end, so a join that has to climb over something still counts as
+    going forward.
     """
     model = surface.evaluated(target)
     inverse = model.matrix_world.inverted()
-    distance = (end - start).length
+    span = end - start
+    distance = span.length
     if distance < step * 1.5:
         return []
+    direction = span / distance
     steps = min(max(int(distance / step), 2), 400)
-    walked = []
+
+    walked, reached = [], 0.0
     for k in range(1, steps):
         point = start.lerp(end, k / steps)
         ok, near, _normal, _index = model.closest_point_on_mesh(
             inverse @ point)
-        walked.append(model.matrix_world @ near if ok else point)
+        landed = model.matrix_world @ near if ok else point
+        along = (landed - start).dot(direction)
+        if along <= reached:
+            continue  # it doubled back; that step is not part of the join
+        if walked and (landed - walked[-1]).length < step * 0.25:
+            continue  # and near enough on top of the last to be the same point
+        reached = along
+        walked.append(landed)
     return walked
 
 

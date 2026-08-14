@@ -1590,6 +1590,53 @@ def scenario_gap_is_bridged_along_surface(core):
                                      step))
 
 
+def scenario_a_join_never_doubles_back(core):
+    """The join across a gap must go one way, not out and back.
+
+    Putting a straight line onto the surface is not the same as walking along
+    it: nearest-point projection is not monotone in general, so a step can
+    land back behind the one before it and the join doubles back on itself.
+    That is a hairpin, and a hairpin cannot be cut — there is no room between
+    its two sides.
+
+    Held as an invariant rather than a reproduction: no fixture here provokes
+    a reversal out of the old code, so this guards the property rather than
+    proving the bug. Whatever provokes it wants adding here when it is found.
+    """
+    print("Scenario: a join across a gap never doubles back")
+    reset_scene()
+    from part_pin import draw_cut, surface
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    step = core.bbox_diagonal(model) * 0.01
+
+    # Two ends on opposite sides of the limb: the straight line between them
+    # runs clean through it, which is the case that used to fold.
+    for gap in (Vector((2.0, 0.0, 0.45)), Vector((1.0, 0.42, 0.0)),
+                Vector((2.6, 0.0, -0.42))):
+        start = surface.project_to_surface(model, Vector((2.0, 0.0, 0.45)))
+        end = surface.project_to_surface(model, -gap + Vector((0.0, 0.0, 0.0))
+                                         if gap.z else
+                                         Vector((gap.x, -gap.y, gap.z)))
+        joined = draw_cut.bridge_points(model, start, end, step)
+        if len(joined) < 2:
+            continue
+        walk = [start] + joined + [end]
+        span = (end - start)
+        if span.length < 1e-9:
+            continue
+        direction = span / span.length
+        along = [(p - start).dot(direction) for p in walk]
+        back = [along[i + 1] - along[i] for i in range(len(along) - 1)]
+        worst = min(back)
+        check(f"the join to {tuple(round(v, 1) for v in end)} only goes "
+              "forward", worst >= -1e-9, f"worst step back {worst:.4f}")
+        check("and every point of it is on the model",
+              max(surface_distance(model, p) for p in joined) < step,
+              f"{max(surface_distance(model, p) for p in joined):.4f}")
+
+
 def scenario_draw_cut(core):
     """Drawing the perimeter onto the model and cutting along it."""
     print("Scenario: draw the cut perimeter on the model")
@@ -2572,6 +2619,7 @@ def main():
     scenario_unusable_line_reports(core)
     scenario_corners_are_kept(core)
     scenario_gap_is_bridged_along_surface(core)
+    scenario_a_join_never_doubles_back(core)
     scenario_draw_cut(core)
     scenario_draw_cut_in_pieces(core)
     scenario_draw_then_adjust(core)
