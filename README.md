@@ -31,9 +31,12 @@ Parts → Export.**
 
 ## 1. Pick the model
 
-Set **Model** in the panel. **Check Mesh** confirms it is closed and manifold;
-if it is not, repair it first (Mesh ▸ Clean Up, Remesh, or the 3D-Print
-Toolbox add-on that ships with Blender).
+Set **Model** in the panel. **Check Mesh** confirms it is closed and manifold.
+A stray edge or two in a dense sculpt is cut through anyway, with a warning —
+the parts carry the same flaw out the other side, and a plain hole is usually
+closed along with the seam. A properly open or broken mesh is refused, and
+wants repairing first (Mesh ▸ Clean Up, Remesh, or the 3D-Print Toolbox add-on
+that ships with Blender).
 
 ## 2. Draw the cut on the model
 

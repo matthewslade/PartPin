@@ -78,6 +78,10 @@ def line_report(cut, target):
 def try_every_band(target, cut, rings, normals, normal, settle):
     """Walk the same bands the cutter would, reporting each."""
     diagonal = core.bbox_diagonal(target)
+    was = core.mesh_issues(target)
+    if any(was):
+        print(f"\n(the model comes in with {was[0]} non-manifold and {was[1]} "
+              "open edge(s); a cut is judged on leaving it no worse than that)")
     scene = bpy.context.scene
     spots = []
     plan = [("rung", h) for h in mesh_cut.BAND_LADDER]
@@ -130,12 +134,15 @@ def try_every_band(target, cut, rings, normals, normal, settle):
                       f"{type(exc).__name__}: {exc}")
                 continue
             issues = [core.mesh_issues(p) for p in pieces]
+            now = [sum(counts) for counts in zip(*issues)]
             print(f"      -> {len(pieces)} piece(s), issues {issues}")
             for piece in pieces:
                 core.remove_object(piece)
-            if len(pieces) >= 2 and all(i == (0, 0) for i in issues):
+            if len(pieces) >= 2 and now[0] <= was[0] and now[1] <= was[1]:
                 print(f"\nVERDICT: this cut goes through, on '{what}'.")
                 return
+            print(f"      *** worse than it started ({now} against "
+                  f"{list(was)}), so this band is rejected")
     if spots:
         print(f"\nVERDICT: the seam comes apart, best case {len(spots)} "
               "spot(s). Where they are, in world space:")

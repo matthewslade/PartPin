@@ -267,33 +267,43 @@ def _cut_surface(obj, rings, normals, heights, scene):
 
 
 def _boundary_loops(bm):
-    """The open rims of a mesh, each as its vertices in the order they run."""
+    """The open rims of a mesh, each as its vertices in the order they run.
+
+    Only rims that come back round to where they started are returned. A real
+    model often arrives with a nick in it somewhere — a stray open edge, a
+    vertex where three faces meet — and those open edges have nothing to do
+    with the cut. Giving up on the whole mesh because of one of them left the
+    seam itself uncapped and both halves open, over a flaw a hundred times
+    further away than the cut. They are stepped over instead, and whatever
+    damage came in is left exactly as it was found.
+    """
     open_edges = [edge for edge in bm.edges if len(edge.link_faces) == 1]
     along = {}
     for edge in open_edges:
         for vert in edge.verts:
             along.setdefault(vert, []).append(edge)
-    if any(len(edges) != 2 for edges in along.values()):
-        return None  # a rim that branches is not a rim we can fill
+    # A rim only runs cleanly through a vertex with exactly two open edges;
+    # anywhere else is damage, and no rim is walked through it.
+    clean = {vert for vert, edges in along.items() if len(edges) == 2}
 
-    # Walk in coordinate order. bmesh elements hash by their address, so
-    # plain dict order starts each rim at a different vertex from run to run,
-    # and the same cut then comes out capped one way and not the next.
-    ordered = sorted(along, key=lambda v: (round(v.co.x, 9), round(v.co.y, 9),
+    # Walk in coordinate order. bmesh elements hash by their address, so plain
+    # dict order starts each rim at a different vertex from run to run, and
+    # the same cut then comes out capped one way and not the next.
+    ordered = sorted(clean, key=lambda v: (round(v.co.x, 9), round(v.co.y, 9),
                                            round(v.co.z, 9)))
     loops, seen = [], set()
     for start in ordered:
         if start in seen:
             continue
         loop, vert, came_from = [], start, None
-        while vert is not None and vert not in seen:
+        while vert in clean and vert not in seen:
             seen.add(vert)
             loop.append(vert)
             step = next((e for e in along[vert] if e is not came_from), None)
             if step is None:
                 break
             came_from, vert = step, step.other_vert(vert)
-        if len(loop) >= 3:
+        if len(loop) >= 3 and vert is loop[0]:
             loops.append(loop)
     return loops
 
@@ -631,13 +641,7 @@ def _cap_all(pieces, normal, settle=None):
     for piece in pieces:
         bm = bmesh.new()
         bm.from_mesh(piece.data)
-        loops = _boundary_loops(bm)
-        if loops is None:
-            bm.free()
-            for _p, spare, _l in opened:
-                spare.free()
-            return False
-        opened.append((piece, bm, loops))
+        opened.append((piece, bm, _boundary_loops(bm)))
 
     plans, ok = [], True
     for _piece, bm, loops in opened:
@@ -673,8 +677,9 @@ def _cap_all(pieces, normal, settle=None):
             break
 
     if ok:
-        ok = all(not any(len(e.link_faces) == 1 for e in bm.edges)
-                 for _p, bm, _l in opened)
+        # Every rim that *could* be filled has to have been. What is left open
+        # is damage the model came in with, which is not this cut's to mend.
+        ok = all(not _boundary_loops(bm) for _p, bm, _l in opened)
     if ok:
         for piece, bm, _loops in opened:
             bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
@@ -729,6 +734,10 @@ def cut_object(obj, rings, normals, normal, scene, collection=None,
     collection = collection or scene.collection
     diagonal = core.bbox_diagonal(obj)
     spots, trouble = [], APART
+    # What the model arrives with. A cut is judged on leaving it no worse, not
+    # on making it perfect: demanding perfect means a model with one nick in it
+    # a long way from the line can never be cut at all.
+    was = core.mesh_issues(obj)
 
     def attempts():
         """Bands to try: the plain ladder first, then rounds of it mended
@@ -768,10 +777,11 @@ def cut_object(obj, rings, normals, normal, scene, collection=None,
             trouble = UNCAPPED
             continue
         # A rung is only accepted on the evidence that it worked: the model
-        # in pieces, every one of them closed. Anything else and the band
-        # gets another go, taller.
-        if len(pieces) >= 2 and all(core.mesh_issues(p) == (0, 0)
-                                    for p in pieces):
+        # in pieces, and between them no more open or non-manifold edges than
+        # it had to begin with. Anything else and the band gets another go.
+        now = [sum(counts) for counts in
+               zip(*(core.mesh_issues(p) for p in pieces))]
+        if len(pieces) >= 2 and now[0] <= was[0] and now[1] <= was[1]:
             return pieces, None, []
         # It parted but would not close up: that is the cap's doing, not the
         # line's, and saying "your line encloses nothing" would be a lie.

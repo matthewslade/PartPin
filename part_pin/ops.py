@@ -46,7 +46,25 @@ def _validated_target(op, context, settings):
         return None
     if not settings.ignore_validation:
         non_manifold, boundary = core.mesh_issues(target)
-        if non_manifold or boundary:
+        damage = non_manifold + boundary
+        # A stray edge or two in a sculpt of half a million faces is not a
+        # broken model, and the cut goes through one perfectly well — the
+        # parts simply carry the same flaw out the other side. Refusing
+        # outright only taught people to tick Skip Mesh Check and lose the
+        # warning along with the check.
+        # A twentieth of a percent of the edges, and at most a handful on a
+        # small mesh. An open sheet fails this outright, as it should: every
+        # edge round it is a boundary, and there is no solid to split.
+        minor = max(4, len(target.data.edges) // 2000)
+        if damage and damage <= minor:
+            op.report(
+                {'WARNING'},
+                f"'{target.name}' has {non_manifold} non-manifold and "
+                f"{boundary} open edge(s) — few enough to cut through, but "
+                "the parts will carry them. Repair it (3D-Print Toolbox) if "
+                "the print comes out wrong",
+            )
+        elif damage:
             op.report(
                 {'ERROR'},
                 f"'{target.name}' is not a closed manifold mesh "

@@ -1977,6 +1977,62 @@ def scenario_parts_can_be_cut_again(core):
               f"{sum(volume(p) for p in made):.4f} vs {before:.4f}")
 
 
+def scenario_a_nicked_model_still_cuts(core):
+    """A stray hole somewhere else must not stop the cut.
+
+    Real sculpts arrive with the odd flaw in them. One open edge a long way
+    from the line used to leave the seam of *both* halves uncapped, because
+    capping gave up on a whole mesh that had any open edge in it at all — so
+    a four-edge flaw in 400,000 faces failed the cut and blamed the line.
+    """
+    print("Scenario: a model with a nick in it still cuts")
+    reset_scene()
+    from part_pin import surface
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+
+    # Knock a hole in it, well away from where the collar will go.
+    import bmesh as bm_mod
+    bm = bm_mod.new()
+    bm.from_mesh(model.data)
+    far = max(bm.faces, key=lambda f: f.calc_center_median().x)
+    bm_mod.ops.delete(bm, geom=[far], context='FACES_ONLY')
+    bm.to_mesh(model.data)
+    bm.free()
+    model.data.update()
+    damage = core.mesh_issues(model)
+    check("the model is damaged to start with", damage[1] > 0, str(damage))
+
+    s.target = model
+    cut = collar_cut(core, surface, model)
+    before = volume(model)
+    failures = []
+    parts, _applied, _warns = core.create_parts(
+        bpy.context, model, [cut], keep_original=True, failures=failures)
+    check("it still cuts in two", len(parts) == 2,
+          f"got {len(parts)}: {failures}")
+    if len(parts) != 2:
+        return
+    # No worse than it came in: the seam is capped on both halves, and the
+    # hole that was there is still exactly one hole.
+    after = [sum(counts) for counts in
+             zip(*(core.mesh_issues(p) for p in parts))]
+    check("and is no worse than it came in",
+          after[0] <= damage[0] and after[1] <= damage[1],
+          f"{after} against {list(damage)}")
+    # A plain hole is a rim like any other, so it gets filled along with the
+    # seam and the part comes out better than the model did. Nothing here
+    # relies on that, but it must never go the other way.
+    for p in parts:
+        check(f"part is not left open: {p.name}",
+              core.mesh_issues(p)[1] <= damage[1],
+              str(core.mesh_issues(p)))
+    filled = sum(volume(p) for p in parts)
+    check("volume is conserved, bar whatever the hole let in",
+          abs(filled - before) < before * 0.01,
+          f"{filled:.4f} vs {before:.4f}")
+
+
 def scenario_a_seam_repairs_itself(core):
     """A seam that comes apart is mended where it came apart.
 
@@ -2525,6 +2581,7 @@ def main():
     scenario_trial_cut(core)
     scenario_seam_lands_on_the_line(core)
     scenario_parts_can_be_cut_again(core)
+    scenario_a_nicked_model_still_cuts(core)
     scenario_a_seam_repairs_itself(core)
     scenario_a_failed_cut_stays_put(core)
     scenario_line_hugs_surface(core)
