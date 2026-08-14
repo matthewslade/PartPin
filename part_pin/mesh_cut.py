@@ -63,6 +63,20 @@ REPAIR_REACH = 5.0
 # before — a crease that shrugged off one go may still give way to three.
 REPAIR_ROUNDS = 3
 
+# How close two samples may be before one of them is dropped, as a share of
+# the average spacing along the line. Two samples in the same place make a
+# band quad with no area, and no intersection can be found against nothing —
+# the seam simply breaks there, at every height, which is a red mark that will
+# not shift however much the band is raised.
+BAND_MIN_GAP = 0.15
+
+# And how much longer than the rest a gap may be before it is filled in.
+# Projecting onto a dense model can leave two neighbouring samples far apart —
+# across a crease, or over a fold — and a band quad spanning that cannot
+# follow the surface between them, so the seam breaks there too. Both ends of
+# this are the same complaint: a band only works on an evenly walked line.
+BAND_MAX_GAP = 1.6
+
 # Passes of averaging along the ring's normals. At a crease the two sides
 # disagree by the whole angle of it, and a band built on the raw normals folds
 # there instead of bending; averaged, it leans along the bisector and crosses
@@ -93,6 +107,48 @@ def ring_normals(ring, target, smoothing=NORMAL_SMOOTHING):
                           else normal)
         normals = evened
     return normals
+
+
+def _thinned(ring):
+    """The ring with samples that crowd their neighbour dropped.
+
+    A dense model projects two nearby samples onto the same feature, and they
+    come back as the same point or near enough. Dropping one moves the line by
+    a fraction of the space between samples — nothing — and it is the
+    difference between a seam that closes and one that does not.
+    """
+    if len(ring) < 4:
+        return ring
+    least = surface.loop_length(ring) / len(ring) * BAND_MIN_GAP
+    kept = [ring[0]]
+    for point in ring[1:]:
+        if (point - kept[-1]).length >= least:
+            kept.append(point)
+    # The ring closes, so the last one has to clear the first as well.
+    while len(kept) > 3 and (kept[-1] - kept[0]).length < least:
+        kept.pop()
+    return kept if len(kept) >= 3 else ring
+
+
+def _filled(ring, target, rounds=4):
+    """The ring with extra samples put into gaps far longer than the rest."""
+    for _round in range(rounds):
+        gaps = sorted((ring[(i + 1) % len(ring)] - p).length
+                      for i, p in enumerate(ring))
+        if not gaps:
+            return ring
+        allowed = gaps[len(gaps) // 2] * BAND_MAX_GAP
+        if allowed <= 0.0 or gaps[-1] <= allowed:
+            return ring
+        grown = []
+        for i, point in enumerate(ring):
+            grown.append(point)
+            after = ring[(i + 1) % len(ring)]
+            if (after - point).length > allowed:
+                grown.append(surface.project_to_surface(
+                    target, (point + after) * 0.5))
+        ring = grown
+    return ring
 
 
 def _work_object(obj, rings, normals, heights, scene):
@@ -832,8 +888,12 @@ def line_rings(cut, target):
     usable, problem, _warning = surface.loop_quality(cut, min_alignment=0.0)
     if problem is not None:
         return None, None, None, None
-    rings = [ring for ring in surface.line_samples(cut, target, usable)
+    # Even the line out before a band is stood on it: drop samples that crowd
+    # each other, then fill the gaps that are left far longer than the rest.
+    rings = [_filled(_thinned(ring), target)
+             for ring in surface.line_samples(cut, target, usable)
              if len(ring) >= 3]
+    rings = [ring for ring in rings if len(ring) >= 3]
     if not rings:
         return None, None, None, None
     normal = cut.matrix_world.to_quaternion() @ Vector((0.0, 0.0, 1.0))

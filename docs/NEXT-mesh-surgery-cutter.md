@@ -258,6 +258,19 @@ runs through open space). Two rules learned the hard way:
 `trial_cut` (bound to **T** in the editor) makes the cut on a copy and reports
 what happens. Keep it: it is the only honest answer to "will this work".
 
+## Also tried, and rejected
+
+- **Capping the band's height by how sharply the line turns** (its normals'
+  turning radius) and **by how close the line comes back to itself**. Both are
+  real effects — a band taller than the turn is round folds its inner rail, and
+  two stretches a unit apart cut each other — and the second is measurably why
+  raising the band makes a hairpin *worse* rather than better. But clamping on
+  either regressed `make_limb_with_fin`, which needs a band taller than the
+  fin's own edges are round, and neither closed the last gap on the model it
+  was written for. Worth revisiting only with a way to tell "the band folded"
+  from "the band was too short", which is the same distinction the old lid
+  never managed either.
+
 ## Still to do
 
 The cutter is in and honest; the old one is still lying around behind it.
