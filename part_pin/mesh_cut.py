@@ -77,6 +77,40 @@ BAND_MIN_GAP = 0.15
 # this are the same complaint: a band only works on an evenly walked line.
 BAND_MAX_GAP = 1.6
 
+# What counts as the line doubling back on itself: two stretches of it closer
+# than this share of the model's size, this far apart along the line, with the
+# surface facing the same way at both.
+#
+# That last condition is what makes this usable. Proximity alone flags a line
+# drawn across a thin fin, where the two sides are legitimately a fin's
+# thickness apart — and marking a cut that works is worse than marking
+# nothing. On a fin the two stretches sit on opposite faces and the surface
+# faces opposite ways there (180 degrees apart, measured). On a hairpin both
+# stretches lie on the same patch and it faces the same way (1 to 23 degrees,
+# measured on two models that would not cut).
+PINCH_NEAR = 0.01
+PINCH_APART = 6
+PINCH_ALIKE = 60.0
+
+
+def hairpins(ring, along, diagonal):
+    """Where the line doubles back on itself, as world positions."""
+    count = len(ring)
+    if count < PINCH_APART * 2 + 2:
+        return []
+    near = diagonal * PINCH_NEAR
+    found = []
+    for i in range(count):
+        for j in range(i + PINCH_APART, count):
+            if min(j - i, count - (j - i)) < PINCH_APART:
+                continue
+            if (ring[i] - ring[j]).length >= near:
+                continue
+            if along[i].angle(along[j], 0.0) * 57.29578 < PINCH_ALIKE:
+                found.append((ring[i] + ring[j]) * 0.5)
+    return found
+
+
 # Passes of averaging along the ring's normals. At a crease the two sides
 # disagree by the whole angle of it, and a band built on the raw normals folds
 # there instead of bending; averaged, it leans along the bisector and crosses

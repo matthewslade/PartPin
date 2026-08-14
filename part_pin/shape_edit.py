@@ -19,10 +19,12 @@ POINT_COLOR = (0.96, 0.96, 0.96, 1.0)
 
 TROUBLE_COLORS = {
     surface.STUCK: (1.0, 0.15, 0.15, 1.0),    # red: the cut cannot get through
+    surface.PINCHED: (1.0, 0.35, 0.85, 1.0),  # pink: the line doubles back
     surface.ADRIFT: (1.0, 0.95, 0.30, 1.0),   # yellow: line off the model
 }
 TROUBLE_LABELS = {
     surface.STUCK: "red = the cut cannot get through here",
+    surface.PINCHED: "pink = the line doubles back on itself",
     surface.ADRIFT: "yellow = off the model",
 }
 CAP_COLOR = (1.0, 0.62, 0.16, 0.16)       # the lid that will do the cutting
@@ -30,7 +32,7 @@ CAP_COLOR_EDGE = (1.0, 0.72, 0.30, 0.5)
 POINT_HOVER = (1.0, 0.95, 0.35, 1.0)
 POINT_ACTIVE = (0.35, 1.0, 0.45, 1.0)
 
-HIT_RADIUS_PX = 14
+HIT_RADIUS_PX = 20
 SEGMENT_SUBDIV = 8
 
 STATUS = ("Drag points — the shaded surface is the cut    "
@@ -318,16 +320,55 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         return model.matrix_world @ location
 
     def _nearest_point(self, mouse):
-        best, best_dist = -1, HIT_RADIUS_PX
-        for i, world in enumerate(self._cache['world']):
+        """The point under the mouse, picked where it is actually drawn.
+
+        Two things used to make this feel like guesswork. It measured to the
+        control points themselves while the dots on screen are drawn lifted
+        clear of the surface, so the target sat a lift away from the dot — and
+        which way, and how far in pixels, changed with the angle you were
+        looking from. And a point round the back of the model competed on
+        equal terms with one in front of it, so a hidden point could take the
+        pick from the one being aimed at.
+        """
+        drawn = self._cache.get('drawn') or self._cache['world']
+        model = surface.evaluated(self.target)
+        inverse = model.matrix_world.inverted()
+        best, best_dist, best_seen = -1, HIT_RADIUS_PX, False
+        for i, world in enumerate(drawn):
             screen = view3d_utils.location_3d_to_region_2d(
                 self.region, self.rv3d, world)
             if screen is None:
                 continue
             dist = (Vector(mouse) - screen).length
-            if dist < best_dist:
-                best, best_dist = i, dist
+            if dist >= HIT_RADIUS_PX:
+                continue
+            seen = not self._hidden(model, inverse, world)
+            # Anything in view beats anything behind the model, and only then
+            # does closeness to the cursor decide.
+            if (seen, -dist) > (best_seen, -best_dist):
+                best, best_dist, best_seen = i, dist, seen
         return best
+
+    def _hidden(self, model, inverse, world):
+        """Whether the model itself stands between the view and this point."""
+        origin = view3d_utils.region_2d_to_origin_3d(
+            self.region, self.rv3d,
+            view3d_utils.location_3d_to_region_2d(self.region, self.rv3d,
+                                                  world))
+        if origin is None:
+            return False
+        span = world - origin
+        reach = span.length
+        if reach < 1e-9:
+            return False
+        hit, location, _normal, _index = model.ray_cast(
+            inverse @ origin, inverse.to_3x3() @ (span / reach))
+        if not hit:
+            return False
+        # Allowed to be a lift's worth in front of the surface it sits on.
+        slack = core.bbox_diagonal(self.target) * max(
+            core.get_settings(bpy.context).line_lift, 1e-4) * 3.0
+        return ((model.matrix_world @ location) - origin).length < reach - slack
 
     def _insert_point(self, context, mouse):
         """Add a control point on the surface, inside the nearest segment."""

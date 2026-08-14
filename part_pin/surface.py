@@ -952,11 +952,14 @@ def remember_stuck(cut, spots):
 # cut that works — which is how they lost the user's trust. They are gone.
 ADRIFT = 'ADRIFT'        # the line has left the model's surface
 STUCK = 'STUCK'          # the cut could not be carried through the surface
+PINCHED = 'PINCHED'      # the line doubles back and nearly touches itself
 
 TROUBLE = {
     ADRIFT: "the line has come off the model here — drag these points back on",
     STUCK: ("the cut could not be carried through the surface here — move the "
             "line off the crease, or take it a shorter way round"),
+    PINCHED: ("the line doubles back on itself here, and there is no room to "
+              "cut between the two sides — drag these points apart"),
 }
 
 
@@ -970,10 +973,19 @@ def inspect_cut(cut, target):
 
     Returns {kind: [world positions]}.
     """
-    found = {ADRIFT: [], STUCK: list(STUCK_AT.get(cut.name, ()))}
-    _usable, problem, _warning = loop_quality(cut, min_alignment=0.0)
+    from . import mesh_cut  # local import: mesh_cut builds on this module
+
+    found = {ADRIFT: [], STUCK: list(STUCK_AT.get(cut.name, ())), PINCHED: []}
+    usable, problem, _warning = loop_quality(cut, min_alignment=0.0)
     if problem is not None:
         return found
+
+    diagonal = core.bbox_diagonal(target)
+    for ring in line_samples(cut, target, usable):
+        if len(ring) < 3:
+            continue
+        found[PINCHED].extend(mesh_cut.hairpins(
+            ring, mesh_cut.ring_normals(ring, target), diagonal))
 
     matrix = cut.matrix_world
     diagonal = core.bbox_diagonal(target)
