@@ -51,10 +51,15 @@ def _mark_sized(self, context):
 
 
 class PartPinControlPoint(bpy.types.PropertyGroup):
-    """One draggable point on a surface cut, in the cut's local space."""
+    """One anchor of a cut line, in the *model's* local space.
+
+    `face` is the model face it last sat on — a starting hint for the walker
+    that saves looking the anchor up from scratch on every rebuild.
+    """
 
     co: FloatVectorProperty(size=3, subtype='XYZ')
     loop: IntProperty(default=0)
+    face: IntProperty(default=-1)
 
 
 class PartPinSettings(bpy.types.PropertyGroup):
@@ -139,17 +144,6 @@ class PartPinSettings(bpy.types.PropertyGroup):
         default=32,
         min=3,
         max=96,
-    )
-    surface_resolution: IntProperty(
-        name="Cut Detail",
-        description=(
-            "How finely the cut surface is built. Higher follows the line more "
-            "closely; lower is steadier on an awkward line, where a finely "
-            "built surface is likelier to fold onto itself"
-        ),
-        default=48,
-        min=8,
-        max=160,
     )
     line_lift: FloatProperty(
         name="Line Lift",
@@ -263,75 +257,38 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.Scene.part_pin = PointerProperty(type=PartPinSettings)
 
-    # Surface-cut shape data (registered after PartPinControlPoint exists).
+    # Cut-line data (registered after PartPinControlPoint exists).
     bpy.types.Object.pp_points = CollectionProperty(type=PartPinControlPoint)
     bpy.types.Object.pp_main_loop = IntProperty(
         name="Main Cut Line",
-        description=("Which cut line sets this cut's plane — the last one "
-                     "edited. -1 picks the longest"),
+        description=("Which cut line the cut's own frame follows — the last "
+                     "one edited. -1 picks the longest"),
         default=-1,
         options={'HIDDEN'},
     )
+    # Anchors used to be kept in the cut object's space. A cut saved that way
+    # is brought across the first time it is read; this says which it is.
+    bpy.types.Object.pp_anchor_space = IntProperty(default=0,
+                                                   options={'HIDDEN'})
     bpy.types.Object.pp_local = BoolProperty(
         name="Cut Inside Line Only",
         description=(
             "Cut only the region ring-fenced by this cut's line, leaving "
-            "the rest of the model whole. Turn off to let the cut surface "
-            "carry on and split everything it meets"
+            "the rest of the model whole. Turn off to let a flat cut through "
+            "the line's own plane carry on and split everything it meets"
         ),
         default=True,
-    )
-    bpy.types.Object.pp_main_loop = IntProperty(
-        name="Main Cut Line",
-        description=("Which cut line sets this cut's plane — the last one "
-                     "edited. -1 picks the longest"),
-        default=-1,
-        options={'HIDDEN'},
-    )
-    bpy.types.Object.pp_local = BoolProperty(
-        name="Cut Inside Line Only",
-        description=(
-            "Cut only the region ring-fenced by this cut's line, leaving "
-            "the rest of the model whole. Turn off to let the cut surface "
-            "carry on and split everything it meets"
-        ),
-        default=True,
-    )
-    bpy.types.Object.pp_undercut = FloatProperty(
-        name="Undercut",
-        description=(
-            "How far the cut may reach into the model around the line, as a "
-            "fraction of the line's size. Raise it to free a piece that is "
-            "recessed into the model — an arm buried under a shoulder — "
-            "which cannot come away without cutting a little of what holds "
-            "it. Leave at 0 to keep the cut to the line"
-        ),
-        default=0.0,
-        min=0.0,
-        max=0.5,
-    )
-    bpy.types.Object.pp_falloff = FloatProperty(
-        name="Falloff",
-        description=(
-            "How far a dragged point's influence spreads across the cut, "
-            "in multiples of the spacing between points. Low is local and "
-            "sharp, high is broad and smooth"
-        ),
-        default=1.5,
-        min=0.2,
-        max=8.0,
     )
 
 
 def unregister():
     del bpy.types.Object.pp_points
-    del bpy.types.Object.pp_falloff
     del bpy.types.Scene.part_pin
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)
     for attr in (
         "pp_role", "pp_cut_kind", "pp_index", "pp_enabled",
         "pp_shape", "pp_clearance", "pp_pin_flip",
-        "pp_local", "pp_main_loop", "pp_undercut",
+        "pp_local", "pp_main_loop", "pp_anchor_space",
     ):
         delattr(bpy.types.Object, attr)

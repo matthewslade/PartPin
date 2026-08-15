@@ -8,7 +8,7 @@ exactly on the line rather than near it.
 
 How it works:
 
-1. The line, as a dense ring of points on the surface — `surface.line_samples`,
+1. The line, as a dense ring of points on the surface — `surface.line_rings`,
    the one definition of where the line runs.
 2. A **band**: a thin ribbon standing along the ring, straddling the surface.
 3. `bpy.ops.mesh.intersect` cuts the model's faces where the band crosses them.
@@ -52,12 +52,18 @@ BUSY = 'BUSY'              # Blender would not run the cut at all just then
 BAND_TAG = "pp_band"
 
 # How much taller the band is made where a seam came apart, and how far along
-# the line that reaches, in multiples of the spacing between samples. A seam
-# only ever fails locally — at one crease the band could not bridge — so the
-# repair is local too: raising the whole band instead is what makes it reach
-# through a thin fin somewhere else entirely.
+# the line that reaches, as a share of the line's own length. A seam only ever
+# fails locally — at one crease the band could not bridge — so the repair is
+# local too: raising the whole band instead is what makes it reach through a
+# thin fin somewhere else entirely.
+#
+# Measured against the line rather than against the spacing between its
+# samples: the line is walked across the model's own faces, so how many
+# samples it has is a fact about the model's density, and a repair that
+# reaches "five samples" covers a hand's breadth of one model and most of the
+# way round another.
 REPAIR_BOOST = 8.0
-REPAIR_REACH = 5.0
+REPAIR_REACH = 0.04
 # Rounds of repair. Each one works from where the *last* attempt came apart,
 # not where the first did, and reaches further and stands taller than the one
 # before — a crease that shrugged off one go may still give way to three.
@@ -88,26 +94,72 @@ BAND_MAX_GAP = 1.6
 # faces opposite ways there (180 degrees apart, measured). On a hairpin both
 # stretches lie on the same patch and it faces the same way (1 to 23 degrees,
 # measured on two models that would not cut).
+#
+# The line is walked across the model's own faces now, so it cannot double
+# back between one anchor and the next at all: a hairpin can only come from
+# anchors dragged into one, where the two sides lie on the same patch and
+# face within a few degrees of each other. What is left in between is the
+# root of a fin, where a line coming round it reads about 40 degrees on a
+# cut that works — so this sits between that and the 23 the real ones came in
+# at, rather than halfway to the fin's own 180.
+# How far apart two stretches have to be *along the line* before being close
+# in space says anything, as a multiple of that closeness. Counted in samples
+# instead, this said nothing at all on a dense model: the line is walked
+# across the model's own faces, so a 441,616-face sculpt gives a ring of two
+# thousand samples, six of them apart is a fraction of a millimetre, and
+# every neighbour within a hundredth of the model reads as a doubling back —
+# twelve thousand of them on a line that cuts perfectly well.
 PINCH_NEAR = 0.01
-PINCH_APART = 6
-PINCH_ALIKE = 60.0
+PINCH_APART = 3.0
+PINCH_ALIKE = 30.0
 
 
 def hairpins(ring, along, diagonal):
-    """Where the line doubles back on itself, as world positions."""
+    """Where the line doubles back on itself, as world positions.
+
+    Bucketed by position rather than compared pair by pair: every sample
+    against every other is four million comparisons on a dense model, and
+    this runs after every drag.
+    """
     count = len(ring)
-    if count < PINCH_APART * 2 + 2:
+    if count < 8:
         return []
     near = diagonal * PINCH_NEAR
+    steps = [(ring[(i + 1) % count] - p).length for i, p in enumerate(ring)]
+    total = sum(steps)
+    apart = near * PINCH_APART
+    if total <= apart * 2.0:
+        return []
+    walked, acc = [0.0] * count, 0.0
+    for i in range(count - 1):
+        acc += steps[i]
+        walked[i + 1] = acc
+
+    cell = max(near, 1e-12)
+    buckets = {}
+    for i, point in enumerate(ring):
+        buckets.setdefault((int(point.x // cell), int(point.y // cell),
+                            int(point.z // cell)), []).append(i)
+
     found = []
-    for i in range(count):
-        for j in range(i + PINCH_APART, count):
-            if min(j - i, count - (j - i)) < PINCH_APART:
-                continue
-            if (ring[i] - ring[j]).length >= near:
-                continue
-            if along[i].angle(along[j], 0.0) * 57.29578 < PINCH_ALIKE:
-                found.append((ring[i] + ring[j]) * 0.5)
+    for i, point in enumerate(ring):
+        home = (int(point.x // cell), int(point.y // cell),
+                int(point.z // cell))
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    for j in buckets.get((home[0] + dx, home[1] + dy,
+                                          home[2] + dz), ()):
+                        if j <= i:
+                            continue
+                        gap = abs(walked[j] - walked[i])
+                        if min(gap, total - gap) <= apart:
+                            continue
+                        if (point - ring[j]).length >= near:
+                            continue
+                        if along[i].angle(along[j], 0.0) * 57.29578 \
+                                < PINCH_ALIKE:
+                            found.append((point + ring[j]) * 0.5)
     return found
 
 
@@ -271,8 +323,7 @@ def _repaired(rings, heights, spots, round_no=0):
     boost = REPAIR_BOOST * (round_no + 1)
     raised, touched = [], False
     for ring, tall in zip(rings, heights):
-        spacing = surface.loop_length(ring) / max(len(ring), 1)
-        reach = spacing * REPAIR_REACH * (round_no + 1)
+        reach = surface.loop_length(ring) * REPAIR_REACH * (round_no + 1)
         along = []
         for point, height in zip(ring, tall):
             near = min((point - spot).length for spot in spots)
@@ -498,10 +549,26 @@ def _ear_clip(flat):
 CAP_RINGS = 5          # steps inwards before the middle is filled in
 CAP_STEP = 0.16        # how far in each step goes, of the cut's own radius
 CAP_THINNING = 0.78    # of its points each step keeps
-CAP_SETTLE = 0.45      # of the way onto the cut's own surface each step goes
+CAP_SETTLE = 0.45      # of the way onto the line's own plane each step goes
 CAP_EVENING = 2        # evening-out passes per step
 CAP_MIN_RING = 12
 CAP_BACKOFF = 5        # halvings of a step before the rings stop
+
+
+def cap_normal(rim):
+    """Which way to look at a rim to fill it in.
+
+    The area-weighted normal of the loop, not the plane of best fit through
+    it. They agree on an even ring and part company on one with an excursion
+    in it — a line taken up over a lump and back — where the plane of best
+    fit leans over towards the excursion, and seen down *that* the loop can
+    cross itself. What has to hold is that the loop is simple seen down this
+    direction, which is what the area-weighted normal is for.
+    """
+    normal = surface.newell_normal(rim)
+    if normal.length < 1e-12:
+        _origin, normal = surface.fit_plane(rim)
+    return normal.normalized()
 
 
 def _cap_frame(normal):
@@ -639,27 +706,26 @@ def _band_tiles(outer, inner, band, points):
     return abs(covered * 0.5 - want) <= want * 1e-6
 
 
-def _settle_ring(ring, settle, centre, across, other, axis):
-    """Move a ring part of the way onto the cut's own surface."""
-    if settle is None:
-        for point in ring:
-            point.z *= 1.0 - CAP_SETTLE
-        return
-    landed = settle([centre + across * p.x + other * p.y + axis * p.z
-                     for p in ring])
-    for point, target in zip(ring, landed):
-        point.z += ((target - centre).dot(axis) - point.z) * CAP_SETTLE
+def _settle_ring(ring):
+    """Move a ring part of the way onto the line's own plane.
+
+    Heights here are measured along that plane's normal from a point on it,
+    so drawing them towards zero *is* settling onto it.
+    """
+    for point in ring:
+        point.z *= 1.0 - CAP_SETTLE
 
 
-def _cap_plan(rim_world, normal, settle=None):
+def _cap_plan(rim_world, normal):
     """How to fill one rim. Returns (extra world points, triangles).
 
     Triangles index the rim's own points first, then the extra ones.
 
-    `settle` puts world points onto the cut's own surface. Each ring inwards
-    goes part of the way there, so the cap leaves the line following the model
-    and arrives at the surface the cut is *for* — flat, unless the surface has
-    been shaped, and either way the surface the connectors were placed on.
+    Each ring inwards is settled closer to the plane fitted to the rim, so
+    the cap leaves the line following the model round the edge of the cut and
+    arrives flat in the middle — which is what a spanning surface wants to be,
+    and the surface the connectors were placed on. Fitting a plane to the
+    finished rim constrains nothing about the line itself.
     """
     across, other, axis = _cap_frame(normal)
     centre = sum(rim_world, Vector()) / len(rim_world)
@@ -684,7 +750,7 @@ def _cap_plan(rim_world, normal, settle=None):
             for _try in range(CAP_BACKOFF):
                 ring = _next_ring(outer, distance, evening)
                 if ring is not None:
-                    _settle_ring(ring, settle, centre, across, other, axis)
+                    _settle_ring(ring)
                     ring_ids = [len(points) + k for k in range(len(ring))]
                     band = _bridge(outer, outer_ids, ring, ring_ids)
                     if _band_tiles(outer, ring, band, points + ring):
@@ -736,7 +802,28 @@ def _aligned(loop, positions):
     return None
 
 
-def _cap_all(pieces, normal, settle=None):
+def _weld_rim(bm):
+    """Merge rim vertices sitting exactly on top of one another.
+
+    Cutting the line into the model's faces leaves the odd pair of vertices
+    in the same place — where the line runs along an edge the model already
+    has, the solver produces the crossing it was asked for *and* keeps the
+    vertex that was there. In the rim those read as edges of no length, and a
+    triangle spanning one has two corners the same, so it cannot be built:
+    the cap comes out with a handful of holes in it and the part will not
+    print. They are the same point by any measure, so merging them takes
+    nothing away.
+    """
+    rim = [v for v in bm.verts if v.is_boundary]
+    if not rim:
+        return
+    lo = [min(v.co[i] for v in bm.verts) for i in range(3)]
+    hi = [max(v.co[i] for v in bm.verts) for i in range(3)]
+    span = max(hi[i] - lo[i] for i in range(3))
+    bmesh.ops.remove_doubles(bm, verts=rim, dist=max(span, 1e-9) * 1e-7)
+
+
+def _cap_all(pieces):
     """Fill the holes the cut left. True if every piece came out closed.
 
     Both halves are filled from **one** triangulation of the rim. Filling them
@@ -745,14 +832,16 @@ def _cap_all(pieces, normal, settle=None):
     different surfaces — so the parts no longer meet, and between them they no
     longer add up to the model.
 
-    The rim lies on the model along the drawn line, and that line is a simple
-    loop seen down the cut's own normal, so flattening it that way and filling
-    the polygon cannot produce a cap that folds.
+    Each rim is filled over the plane fitted to *it*, not to some frame the
+    cut carries about with it. A cut with several lines round different
+    features has a different plane per line, and one shared frame could only
+    ever suit one of them.
     """
     opened = []
     for piece in pieces:
         bm = bmesh.new()
         bm.from_mesh(piece.data)
+        _weld_rim(bm)
         opened.append((piece, bm, _boundary_loops(bm)))
 
     plans, ok = [], True
@@ -765,7 +854,7 @@ def _cap_all(pieces, normal, settle=None):
                          and (p[3] - centre).length < spread * 1e-4), None)
             if plan is None:
                 rim = [v.co.copy() for v in loop]
-                extra, tris = _cap_plan(rim, normal, settle)
+                extra, tris = _cap_plan(rim, cap_normal(rim))
                 if tris is None:
                     ok = False
                     break
@@ -801,7 +890,7 @@ def _cap_all(pieces, normal, settle=None):
     return ok
 
 
-def _part_and_cap(bm, layer, seam, normal, scene, collection, settle=None):
+def _part_and_cap(bm, layer, seam, scene, collection):
     """Split the two sides apart and cap each. Returns the pieces."""
     bmesh.ops.delete(bm, geom=[f for f in bm.faces if f[layer]],
                      context='FACES')
@@ -817,7 +906,7 @@ def _part_and_cap(bm, layer, seam, normal, scene, collection, settle=None):
     bpy.context.view_layer.update()
 
     pieces = core.split_loose(whole)
-    _cap_all(pieces, normal, settle)
+    _cap_all(pieces)
     _drop_tag(pieces)
     return pieces
 
@@ -834,8 +923,7 @@ def _drop_tag(pieces):
             piece.data.attributes.remove(marking)
 
 
-def cut_object(obj, rings, normals, normal, scene, collection=None,
-               settle=None):
+def cut_object(obj, rings, normals, scene, collection=None):
     """Sever `obj` along the ring. Returns (pieces, problem).
 
     Returns (pieces, problem, spots). `pieces` is what it fell into when it
@@ -891,8 +979,7 @@ def cut_object(obj, rings, normals, normal, scene, collection=None,
             continue
         bm, layer, seam = found
         try:
-            pieces = _part_and_cap(bm, layer, seam, normal, scene,
-                                   collection, settle)
+            pieces = _part_and_cap(bm, layer, seam, scene, collection)
         except Exception:
             trouble = UNCAPPED
             continue
@@ -912,35 +999,18 @@ def cut_object(obj, rings, normals, normal, scene, collection=None,
 
 
 def line_rings(cut, target):
-    """What the cutter needs of a cut's lines, or four Nones.
+    """What the cutter needs of a cut's lines, or two Nones.
 
-    Returns (rings, their normals, the cut normal, settle), where `settle`
-    puts world points onto the cut's own surface — the one the connectors sit
-    on, and the one the middle of the cap is drawn down to.
+    Returns (rings, their normals). The single seam between the line and the
+    cutter: everything below this reads a ring of world points on the surface
+    and nothing else about how the line is stored.
     """
-    surface.refit_frame(cut)
-    usable, problem, _warning = surface.loop_quality(cut, min_alignment=0.0)
-    if problem is not None:
-        return None, None, None, None
     # Even the line out before a band is stood on it: drop samples that crowd
     # each other, then fill the gaps that are left far longer than the rest.
     rings = [_filled(_thinned(ring), target)
-             for ring in surface.line_samples(cut, target, usable)
+             for ring in surface.line_rings(cut, target)
              if len(ring) >= 3]
     rings = [ring for ring in rings if len(ring) >= 3]
     if not rings:
-        return None, None, None, None
-    normal = cut.matrix_world.to_quaternion() @ Vector((0.0, 0.0, 1.0))
-
-    field = surface.field_for(cut, usable)
-    matrix = cut.matrix_world
-    inverse = matrix.inverted()
-
-    def settle(points):
-        local = [inverse @ p for p in points]
-        heights = field.eval_many([(p.x, p.y) for p in local])
-        return [matrix @ Vector((p.x, p.y, h))
-                for p, h in zip(local, heights)]
-
-    return (rings, [ring_normals(ring, target) for ring in rings],
-            normal, settle)
+        return None, None
+    return rings, [ring_normals(ring, target) for ring in rings]

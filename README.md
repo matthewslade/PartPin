@@ -72,11 +72,10 @@ the cutting** drawn through the model.
 
 | Action | Result |
 | --- | --- |
-| Drag a point | It slides along the surface; the line and the cut surface follow it |
+| Drag a point | It slides along the surface; the two stretches of line either side of it are walked again across the model |
 | Ctrl+Click | Add a point |
 | X | Remove the point under the cursor |
 | Alt+X | Remove a whole cut line |
-| Ctrl+Wheel | Widen or tighten the falloff — how far each point's pull spreads |
 | **T** | **Try the cut** on a copy and say whether it separates |
 | Enter | Confirm |
 | Esc | Revert |
@@ -88,14 +87,15 @@ around while editing.
 
 After every drag, the line is measured against your model and anything wrong
 with it is marked where it is wrong. A line with nothing wrong is marked nothing
-at all — there is one thing left that can be wrong with a line, because the cut
-is made along the model's own surface and so cannot go anywhere the line does
-not.
+at all — and there is not much left that can be wrong with a line, because the
+line is walked across the model's own surface and the cut is made along it.
 
 | Mark | Meaning | What to do |
 | --- | --- | --- |
 | **Red** | The last attempt at this cut could not get through the surface there | Move the line off the crease, or take it a shorter way round |
 | **Yellow** | The line has come off the model there | Drag those points back onto it |
+| **Blue** | The line cannot get from one point to the next across the model | They are on pieces of the model that do not join up — move them onto one |
+| **Pink** | The line doubles back on itself, with no room to cut between the two sides | Drag those points apart |
 
 Red marks come from actually trying the cut — pressing **T**, or Create Parts
 failing — so they show where it really got stuck rather than where it might.
@@ -149,9 +149,11 @@ cut are parted, and each is capped with the same polygon. Nothing is invented
 to cut with, so **the perimeter decides everything**: there is no plane to
 flatten your line onto, and nothing reaching sideways into the model.
 
-The seam is the line — not a surface fitted near it. Nothing at all is spent at
-the seam either: the two parts add back up to exactly the model you started
-with, and they mate face to face.
+The seam is the line — not a surface fitted near it. The line itself is on the
+model everywhere: between the points you place, it is walked across the
+surface, taking the shortest way there is. Nothing at all is spent at the seam
+either: the two parts add back up to exactly the model you started with, and
+they mate face to face.
 
 Only the material inside the line is cut. Draw round an arm at the armpit and
 the arm comes away with the body left whole, even though the cut's plane would
@@ -163,10 +165,8 @@ where it crosses, because that is what drawing the line over it asks for.
 | Setting | What it does |
 | --- | --- |
 | **Points** | How many draggable points a new line gets (32). Corners always get one, so the count is a guide rather than a rule. More follow a drawn line more closely; fewer are easier to shove about |
-| **Cut Detail** | How finely the cut surface is built. Higher follows the line more closely; lower is steadier on an awkward line, where a fine surface is likelier to fold |
 | **Line Lift** | How far above the surface the line is drawn, so the surface cannot swallow it. Drawing only — the cut does not move |
-| **Undercut** | How far the cut may reach into the model around the line, to free a recessed piece. 0 by default |
-| **Cut Inside Line Only** | On by default. Off lets the cut surface carry on and split everything it meets |
+| **Cut Inside Line Only** | On by default. Off cuts straight through on the flat plane closest to your line, splitting everything it meets |
 
 ## Testing
 
@@ -176,9 +176,10 @@ The whole geometry side runs headless — no UI needed:
 blender --background --python-exit-code 1 --python tests/smoke_test.py
 ```
 
-45 scenarios covering cuts, connectors, drawing, the warnings and all three
-exporters, checking that every part comes out closed and manifold. On macOS the
-binary is usually `/Applications/Blender.app/Contents/MacOS/Blender`.
+Fifty-odd scenarios covering cuts, connectors, drawing, the line itself, the
+warnings and all three exporters, checking that every part comes out closed and
+manifold. On macOS the binary is usually
+`/Applications/Blender.app/Contents/MacOS/Blender`.
 
 ## If a cut will not separate
 
@@ -190,24 +191,23 @@ Press **T** at any point — it makes the cut on a copy and tells you what
 happened, which beats guessing.
 
 If the line still cannot be cut into the surface, **untick "Cut Inside Line
-Only"**. That cuts along your drawn surface all the way through the model,
-using a cutter that is a height over a plane extruded into a solid, so it
-always produces two clean, closed parts. It takes more of the model with the
-piece than the line asks for, which you can trim afterwards.
+Only"**. That cuts straight through the model on the flat plane closest to your
+line, which always produces two clean, closed parts. It takes more of the model
+with the piece than the line asks for, which you can trim afterwards.
 
 ## Working on this
 
-The **cut line** is being rebuilt — see
-[docs/NEXT-geodesic-cut-line.md](docs/NEXT-geodesic-cut-line.md). It is stored
-as a height field over a fitted plane, which cannot hold a contour that wraps
-round anything: the line sags away from its own points between them, and where
-it cannot express what was drawn it doubles back on itself. That is measured,
-and it is the cause of most of what is awkward about the tool.
+The **cut line** is an ordered ring of anchors sitting on the model, kept in the
+model's own space, with the path between consecutive anchors walked across the
+surface — `part_pin/walker.py`. It used to be a height field over a fitted
+plane, which cannot hold a contour that wraps round anything: the line sagged
+away from its own points between them, and where the field could not express
+what was drawn it doubled back on itself.
+[docs/NEXT-geodesic-cut-line.md](docs/NEXT-geodesic-cut-line.md) is the record
+of that rework, what it measured, and what is left.
 
 [docs/NEXT-mesh-surgery-cutter.md](docs/NEXT-mesh-surgery-cutter.md) covers the
-cutter itself — how it works, what was measured on the way to it, and what is
-still left to clear out behind it. The cutter is sound; the line it is given is
-the problem.
+cutter itself — how it works, and what was measured on the way to it.
 
 ## Limits worth knowing
 
@@ -215,8 +215,8 @@ the problem.
   along with it, so draw round the piece rather than across what holds it.
 - Cutting is exact but not instant: multi-million-poly meshes take a while. Cut
   before subdividing where you can.
-- One cut has one plane. Lines facing more than about 45° away from the one you
-  last edited are skipped with a warning — give each such region its own cut.
+- A line has to sit on one connected piece of the model. Two anchors on shells
+  that do not join cannot be walked between, and the line says so.
 - Drawing and dragging follow the visible surface, so orbit first to reach the
   far side.
 - Modifiers on the model are baked into the parts.

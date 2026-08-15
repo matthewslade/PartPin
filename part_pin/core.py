@@ -17,7 +17,7 @@ Connector  A draft pin object sitting on the cut, spanning the seam
 
 import bmesh
 import bpy
-from mathutils import Matrix, Quaternion, Vector
+from mathutils import Matrix, Vector
 from mathutils.geometry import interpolate_bezier
 
 DRAFT_COLLECTION = "PartPin Drafts"
@@ -63,12 +63,6 @@ def ensure_collection(scene, name, unique=False):
     coll = bpy.data.collections.new(name)
     scene.collection.children.link(coll)
     return coll
-
-
-def link_only(obj, coll):
-    for c in list(obj.users_collection):
-        c.objects.unlink(obj)
-    coll.objects.link(obj)
 
 
 def new_mesh_object(name, bm, coll, matrix=None):
@@ -130,11 +124,6 @@ def mesh_issues(obj):
     bm.free()
     bpy.data.meshes.remove(me)
     return non_manifold, boundary
-
-
-def is_mesh_closed(obj):
-    non_manifold, boundary = mesh_issues(obj)
-    return non_manifold == 0 and boundary == 0
 
 
 # ----------------------------------------------------------------------
@@ -289,9 +278,7 @@ def build_cutter(cut_obj, target, scene):
     if cut_obj.pp_cut_kind == 'SURFACE':
         # Imported here: surface.py builds on this module's helpers.
         from . import surface
-        resolution = get_settings(bpy.context).surface_resolution
-        return surface.build_surface_cutter(cut_obj, target, resolution,
-                                            scene)
+        return surface.build_surface_cutter(cut_obj, target, scene)
     if cut_obj.pp_cut_kind == 'CURVE':
         return make_curve_cutter(cut_obj, target, scene)
     return make_halfspace_cutter(cut_obj.matrix_world, bbox_diagonal(target),
@@ -599,40 +586,8 @@ def split_loose(obj):
     return pieces
 
 
-def mesh_volume(obj):
-    bm = bmesh.new()
-    bm.from_mesh(obj.data)
-    bm.transform(obj.matrix_world)
-    volume = bm.calc_volume(signed=False)
-    bm.free()
-    return volume
-
-
-def drop_debris(pieces, share=1e-4):
-    """Discard numerical crumbs left by a boolean.
-
-    A cut that grazes along the surface can shed slivers of no volume. They
-    are not parts anyone would print, and passing them on as parts means
-    stray specks in the collection and in the exported files.
-    """
-    if len(pieces) < 2:
-        return pieces, 0
-    volumes = [(piece, mesh_volume(piece)) for piece in pieces]
-    biggest = max(volume for _piece, volume in volumes)
-    if biggest <= 0.0:
-        return pieces, 0
-    kept, dropped = [], 0
-    for piece, volume in volumes:
-        if volume > biggest * share:
-            kept.append(piece)
-        else:
-            remove_object(piece)
-            dropped += 1
-    return (kept or pieces), dropped
-
-
-def split_parts_surgery(parts, rings, normals, normal, scene, parts_coll,
-                        settle=None, stuck=None, why=None):
+def split_parts_surgery(parts, rings, normals, scene, parts_coll,
+                        stuck=None, why=None):
     """Cut every part the drawn line runs across, and leave the rest whole.
 
     A line only ever crosses one of the parts on the table, and it may cross
@@ -649,51 +604,13 @@ def split_parts_surgery(parts, rings, normals, normal, scene, parts_coll,
         why = []
     for part in parts:
         pieces, trouble, spots = mesh_cut.cut_object(
-            part, rings, normals, normal, scene, parts_coll, settle)
+            part, rings, normals, scene, parts_coll)
         if pieces is None:
             # Keep the closest account of why, so the editor can mark it and
             # the message can say which of the three things went wrong.
             if spots and (not stuck or len(spots) < len(stuck)):
                 stuck[:] = spots
             why.append(trouble)
-            result.append(part)
-            continue
-        remove_object(part)
-        for piece in pieces:
-            piece.pp_role = ROLE_PART
-        result.extend(pieces)
-        split_any = True
-    return result, split_any
-
-
-def split_parts_local(parts, slab, parts_coll, debris=None, tangled=None):
-    """Sever parts with a thin slab and keep the resulting pieces.
-
-    Unlike a plane cutter this only separates what the slab actually
-    spans, so material elsewhere in the model is left whole.
-    """
-    result = []
-    split_any = False
-    if debris is None:
-        debris = [0]
-    for part in parts:
-        work = duplicate_object(part, part.name, parts_coll)
-        if not boolean_apply(work, slab, 'DIFFERENCE'):
-            # An empty result means the cutter tangled: the solver cannot make
-            # sense of a surface that crosses itself, and returns nothing. That
-            # is a different problem from the piece being joined on, and worth
-            # saying so rather than blaming the line.
-            if tangled is not None:
-                tangled[0] = True
-            remove_object(work)
-            result.append(part)
-            continue
-        pieces, crumbs = drop_debris(split_loose(work))
-        if crumbs:
-            debris[0] += crumbs
-        if len(pieces) < 2:
-            for piece in pieces:
-                remove_object(piece)
             result.append(part)
             continue
         remove_object(part)
@@ -744,24 +661,21 @@ def create_parts(context, target, cuts, keep_original=True, part_gap=0.0,
     # cutter works from the evaluated mesh.
     context.view_layer.update()
 
-    from . import surface  # local import: surface.py builds on this module
+    # Local imports: both build on this module's helpers.
+    from . import mesh_cut, surface
 
     for cut in cuts:
         if surface.is_local(cut):
-            rings, normals, normal, settle = surface.line_rings(cut, target)
+            rings, normals = mesh_cut.line_rings(cut, target)
             if rings is None:
                 failures.append(
                     f"Cut '{cut.name}': "
-                    f"{surface.cut_line_problem(cut) or 'no usable cut line'}")
+                    f"{surface.cut_line_problem(cut, target)}")
                 continue
-            _usable, _problem, note = surface.loop_quality(cut,
-                                                           min_alignment=0.0)
-            if note:
-                warnings.append(f"Cut '{cut.name}': {note}")
             stuck, why = [], []
             parts, split_any = split_parts_surgery(parts, rings, normals,
-                                                   normal, scene, parts_coll,
-                                                   settle, stuck, why)
+                                                   scene, parts_coll,
+                                                   stuck, why)
             surface.remember_stuck(cut, stuck)
             if not split_any:
                 # Say why, and leave it at that. Reaching further to force a
@@ -772,8 +686,6 @@ def create_parts(context, target, cuts, keep_original=True, part_gap=0.0,
                     f"{surface.failure_reason(stuck, why[0] if why else None)}")
             continue
 
-        if cut.pp_cut_kind == 'SURFACE':
-            surface.refit_frame(cut)
         cutter = build_cutter(cut, target, scene)
         if cutter is None:
             warnings.append(f"Cut '{cut.name}' has no usable geometry — skipped")

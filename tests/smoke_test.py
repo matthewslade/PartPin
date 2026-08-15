@@ -345,26 +345,272 @@ def surface_distance(obj, world_point):
     return ((obj.matrix_world @ loc) - world_point).length
 
 
-def scenario_height_field(core):
-    print("Scenario: height field maths")
+def scenario_the_walker(core):
+    """The one piece of new machinery: the shortest path across the surface.
+
+    Measured against a sphere, where the answer is known exactly — the great
+    circle. A path that is on the surface but not straightened comes out
+    noticeably longer, and a path that is straightened in space rather than
+    across the surface comes out shorter than the great circle and off the
+    model, so the length alone separates all three.
+    """
+    print("Scenario: walking a span across the surface")
+    reset_scene()
+    from part_pin import walker
+
+    model = make_sphere(radius=1.0)
+    bpy.context.view_layer.update()
+
+    for degrees in (22.5, 45.0, 90.0):
+        lat = math.radians(20.0)
+        a = Vector((math.cos(lat), 0.0, math.sin(lat)))
+        b = Vector((math.cos(lat) * math.cos(math.radians(degrees)),
+                    math.cos(lat) * math.sin(math.radians(degrees)),
+                    math.sin(lat)))
+        start, face_a = walker.place(model, a)
+        end, face_b = walker.place(model, b)
+        walked = walker.between(model, start, end, face_a, face_b)
+        check(f"the span at {degrees}° is walked", walked is not None)
+        if walked is None:
+            continue
+        path = [start] + walked + [end]
+        length = sum((path[i + 1] - path[i]).length
+                     for i in range(len(path) - 1))
+        arc = math.acos(max(-1.0, min(1.0, start.normalized()
+                                      .dot(end.normalized()))))
+        check(f"it is the geodesic at {degrees}°, not a zig-zag",
+              abs(length / arc - 1.0) < 0.02,
+              f"walked {length:.5f} against a great circle of {arc:.5f}")
+        worst = max(surface_distance(model, model.matrix_world @ p)
+                    for p in path)
+        check(f"and every point of it is on the model at {degrees}°",
+              worst < 1e-6, f"furthest {worst:.2e}")
+        # The samples are the edge crossings, so they cannot crowd or gap.
+        gaps = [(path[i + 1] - path[i]).length for i in range(len(path) - 1)]
+        check(f"walked at an even spacing at {degrees}°",
+              max(gaps) < 4.0 * (sum(gaps) / len(gaps)),
+              f"{min(gaps):.4f}..{max(gaps):.4f}")
+
+    # A hint that has gone stale is checked rather than trusted.
+    point = Vector((0.0, 0.0, 1.0))
+    landed, face = walker.place(model, point)
+    same, again = walker.place(model, landed, hint=face)
+    check("a good face hint is taken", again == face and
+          (same - landed).length < 1e-9)
+    moved, elsewhere = walker.place(model, Vector((1.0, 0.0, 0.0)), hint=face)
+    check("a stale one is not", elsewhere != face
+          and surface_distance(model, model.matrix_world @ moved) < 1e-6)
+
+    # Two shells that do not join have no path between them, and that is
+    # said plainly rather than papered over with a line through space.
+    reset_scene()
+    pair = make_two_spheres(core, gap=4.0)
+    bpy.context.view_layer.update()
+    here, face_a = walker.place(pair, Vector((0.0, 0.0, 1.0)))
+    there, face_b = walker.place(pair, Vector((4.0, 0.0, 1.0)))
+    check("a span between two loose shells fails, rather than cutting "
+          "through space",
+          walker.between(pair, here, there, face_a, face_b) is None)
+
+
+def scenario_the_line_holds_its_contour(core):
+    """The whole point of the rework: the line is on the model everywhere,
+    it does not sag away from the anchors between them, and it never doubles
+    back on itself.
+
+    Stored as a height field over a fitted plane, a line passed through its
+    anchors exactly and strayed up to 0.894% of the model between them, with
+    hundreds of hairpins on a line that had only just been drawn.
+    """
+    print("Scenario: the line holds the contour it was drawn on")
+    from part_pin import mesh_cut, surface
+
+    def measure(label, model, cut, allow_off_anchors):
+        rings = surface.line_rings(cut, model)
+        check(f"{label}: the line is built", bool(rings))
+        if not rings:
+            return None
+        found = surface.line_quality(cut, model)
+        diagonal = found['diagonal']
+        check(f"{label}: every sample is on the model",
+              found['off_surface'] < 1e-4,
+              f"furthest {found['off_surface']:.2e} "
+              f"= {found['off_surface'] / diagonal:.5%} of the model")
+        check(f"{label}: no span could not be walked", not found['broken'])
+        check(f"{label}: it holds its contour between the anchors",
+              found['off_anchors'] < diagonal * allow_off_anchors,
+              f"{found['off_anchors'] / diagonal:.4%} of the model, "
+              f"allowed {allow_off_anchors:.2%}")
+        check(f"{label}: no hairpins on a freshly drawn line",
+              found['hairpins'] == 0, f"{found['hairpins']} pairs")
+        # Every anchor is *on* the line, not near it.
+        worst = 0.0
+        for ring, anchors in zip(rings, surface.world_anchors(cut, model)):
+            for anchor in anchors:
+                worst = max(worst, min((anchor - p).length for p in ring))
+        check(f"{label}: the line runs through every anchor", worst < 1e-9,
+              f"furthest anchor {worst:.2e} from the line")
+        return found
+
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    measure("collar on a limb", model, collar_cut(core, surface, model), 0.01)
+
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_cube_model(core)
+    s.target = model
+    cut, _error = surface.cut_from_stroke(bpy.context, model,
+                                          waist_stroke(surface, model),
+                                          per_loop=16)
+    if cut is not None:
+        measure("waist on a cube", model, cut, 0.01)
+
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model, base, axis = make_shoulder_arm(core)
+    s.target = model
+    stroke = collar_stroke(surface, model, base + axis * 0.55, axis)
+    cut, _error = surface.cut_from_stroke(bpy.context, model, stroke,
+                                          per_loop=18)
+    if cut is not None:
+        measure("collar in an armpit", model, cut, 0.01)
+
+    # And it holds it better the more anchors there are. The line only ever
+    # leaves the polyline through its anchors by as much as the surface bends
+    # between them, so putting them closer together closes the gap — sharply,
+    # because that is a chord against an arc. A line sagging towards a fitted
+    # plane instead would keep on sagging however many points it was given.
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    bpy.ops.partpin.add_plane_cut()
+    cut = bpy.context.view_layer.objects.active
+    cut, _error = surface.convert_to_surface(bpy.context, cut, model,
+                                             per_loop=16)
+    strayed = {}
+    for count in (8, 16, 32):
+        surface.store_anchors(cut, collar_points(surface, model, count=count),
+                              [0] * count)
+        strayed[count] = surface.line_quality(cut, model)['off_anchors']
+    check("more anchors hold the contour more closely",
+          strayed[8] > strayed[16] > strayed[32],
+          ", ".join(f"{k}: {v:.5f}" for k, v in sorted(strayed.items())))
+    check("and it closes on them as a chord closes on an arc",
+          strayed[8] > strayed[32] * 8.0,
+          ", ".join(f"{k}: {v:.5f}" for k, v in sorted(strayed.items())))
+
+    # Whatever the cutter is handed keeps the same properties.
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    cut = collar_cut(core, surface, model)
+    rings, _normals = mesh_cut.line_rings(cut, model)
+    worst = max(surface_distance(model, p) for ring in rings for p in ring)
+    check("the ring the cutter is handed is on the model too", worst < 1e-4,
+          f"furthest {worst:.2e}")
+
+
+def scenario_dragging_stays_local(core):
+    """Dragging one anchor re-walks the two spans either side of it, and
+    nothing else. That is what keeps it usable on a dense sculpt."""
+    print("Scenario: dragging is local, and quick on a dense model")
+    reset_scene()
+    import time
+    from part_pin import surface, walker
+    s = bpy.context.scene.part_pin
+
+    model = link(bpy.data.objects.new("Dense", make_dense_mesh()))
+    s.target = model
+    # The size the bar is set at: the user's sculpt is 441,616 faces and
+    # 156 across, and dragging a point on it has to stay interactive.
+    check("the fixture is as dense as the model this is for",
+          len(model.data.polygons) > 400000,
+          f"{len(model.data.polygons)} faces")
+
+    walker.forget()
+    started = time.time()
+    cut, _error = surface.cut_from_stroke(
+        bpy.context, model,
+        collar_stroke(surface, model, Vector((60.0, 0.0, 0.0)),
+                      Vector((0.0, 1.0, 0.0)), count=200, reach=60.0),
+        per_loop=25)
+    check("a collar is drawn on it", cut is not None)
+    if cut is None:
+        return
+    print(f"  (first build, including reading the model: "
+          f"{time.time() - started:.3f}s)")
+
+    before = [list(ring) for ring in surface.line_rings(cut, model)]
+    moved = 3
+    anchor = cut.pp_points[moved]
+    landed, face = walker.place(
+        model, Vector(anchor.co) + Vector((0.0, 0.0, 6.0)))
+    anchor.co = landed
+    anchor.face = face
+
+    started = time.time()
+    after = [list(ring) for ring in surface.line_rings(cut, model)]
+    elapsed = time.time() - started
+    check("re-walking after a drag is interactive", elapsed < 0.1,
+          f"{elapsed * 1000:.1f} ms")
+
+    # Everything more than two spans away from the anchor that moved is the
+    # very same point it was, not merely close to it.
+    was = {(round(q.x, 9), round(q.y, 9), round(q.z, 9)) for q in before[0]}
+    kept = sum(1 for p in after[0]
+               if (round(p.x, 9), round(p.y, 9), round(p.z, 9)) in was)
+    check("most of the line is untouched by the drag",
+          kept > len(after[0]) * 0.7,
+          f"{kept} of {len(after[0])} samples are unchanged")
+    check("and the line still lies on the model",
+          surface.line_quality(cut, model)['off_surface'] < 1e-4)
+    walker.forget()
+
+
+def scenario_no_line_is_ever_skipped(core):
+    """A cut has no single plane any more, so no line is set aside for
+    facing the wrong way, and nothing warns about one."""
+    print("Scenario: no line is skipped for facing the wrong way")
+    reset_scene()
+    import inspect as inspect_module
     from part_pin import surface
-    from mathutils import Vector as V
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
 
-    flat = surface.HeightField([V((0, 0, 0)), V((1, 0, 0)), V((0, 1, 0))])
-    check("flat field stays flat", abs(flat.eval(0.4, 0.4)) < 1e-12)
+    bpy.ops.partpin.add_plane_cut()
+    cut = bpy.context.view_layer.objects.active
+    cut, _error = surface.convert_to_surface(bpy.context, cut, model,
+                                             per_loop=16)
+    # A collar round the limb and a line lying lengthwise along it: two
+    # lines whose planes are at right angles to one another.
+    collar = collar_points(surface, model, cut)
+    lengthwise = []
+    for i in range(10):
+        angle = 2.0 * math.pi * i / 10
+        lengthwise.append(model.matrix_world.inverted()
+                          @ surface.project_to_surface(
+                              model, Vector((-1.0 + 0.8 * math.cos(angle),
+                                             0.42 * math.sin(angle), 0.0))))
+    surface.store_anchors(cut, collar + lengthwise, [0] * 16 + [1] * 10)
 
-    nodes = [V((0, 0, 0)), V((1, 0, 0.3)), V((0, 1, -0.2)), V((1, 1, 0.1)),
-             V((0.5, 0.5, 0.25))]
-    field = surface.HeightField(nodes, falloff=2.0)
-    worst = max(abs(field.eval(n.x, n.y) - n.z) for n in nodes)
-    check("field passes through every control point", worst < 1e-4,
-          f"max error {worst:.2e}")
-    far = abs(field.eval(14.0, 14.0))
-    check("field flattens away from the points", far < 1e-3,
-          f"h={far:.2e}")
-    n = field.normal(0.5, 0.5)
-    check("normal is unit length and upward",
-          abs(n.length - 1.0) < 1e-6 and n.z > 0.0)
+    usable = surface.usable_loop_indices(cut)
+    check("both lines are usable, whatever way they face", usable == [0, 1],
+          f"usable lines {usable}")
+    check("and nothing is wrong with the cut",
+          surface.cut_line_problem(cut, model) is None,
+          str(surface.cut_line_problem(cut, model)))
+    rings = surface.line_rings(cut, model)
+    check("both lines are walked", len(rings) == 2, f"got {len(rings)}")
+
+    source = "".join(inspect_module.getsource(m) for m in (surface,))
+    check("no alignment test is left in the code",
+          "min_alignment" not in source and "do not share a plane" not in source)
 
 
 def scenario_surface_convert(core):
@@ -387,12 +633,14 @@ def scenario_surface_convert(core):
     check("16 control points stored", len(cut.pp_points) == 16,
           f"got {len(cut.pp_points)}")
 
-    on_surface = max(surface_distance(model, cut.matrix_world @ Vector(p.co))
+    on_surface = max(surface_distance(model, model.matrix_world @ Vector(p.co))
                      for p in cut.pp_points)
-    check("control points sit on the model surface", on_surface < 1e-3,
+    check("anchors sit on the model surface", on_surface < 1e-3,
           f"max {on_surface:.2e}")
-    heights = [abs(p.co[2]) for p in cut.pp_points]
-    check("unedited surface is still flat", max(heights) < 1e-6)
+    check("every anchor knows the face it sits on",
+          all(p.face >= 0 for p in cut.pp_points))
+    check("anchors are kept in the model's space",
+          cut.pp_anchor_space == surface.MODEL_SPACE)
 
     bpy.ops.partpin.create_parts()
     parts = parts_of(s)
@@ -426,7 +674,7 @@ def scenario_surface_drag(core):
     # Simulate a drag: slide one point up the sphere to 40° latitude,
     # exactly what the modal operator does on mouse-move.
     point = cut.pp_points[0]
-    start = cut.matrix_world @ Vector(point.co)
+    start = model.matrix_world @ Vector(point.co)
     azimuth = math.atan2(start.y, start.x)
     lat = math.radians(40.0)
     # Snap onto the faceted mesh, exactly like a viewport ray-cast hit.
@@ -437,14 +685,13 @@ def scenario_surface_drag(core):
     check("drag target is on the model surface",
           surface_distance(model, dragged) < 1e-6,
           f"{surface_distance(model, dragged):.2e}")
-    point.co = cut.matrix_world.inverted() @ dragged
+    point.co = model.matrix_world.inverted() @ dragged
     surface.build_display_mesh(cut, model)
 
-    field = surface.field_for(cut)
-    local = Vector(point.co)
-    check("cut surface passes through the dragged point",
-          abs(field.eval(local.x, local.y) - local.z) < 1e-4,
-          f"{field.eval(local.x, local.y):.6f} vs {local.z:.6f}")
+    line = surface.line_rings(cut, model)[0]
+    check("the cut line runs through the dragged point",
+          min((p - dragged).length for p in line) < 1e-9,
+          f"nearest sample {min((p - dragged).length for p in line):.2e}")
 
     bpy.ops.partpin.create_parts()
     parts = parts_of(s)
@@ -460,13 +707,12 @@ def scenario_surface_drag(core):
           f"{total:.4f} vs {original_volume:.4f}")
 
     # The seam must actually run through the dragged point: it lies on the
-    # cut face, which both parts share. The cut surface is a grid, so allow
-    # roughly one cell of discretization error.
-    lo, hi = core.world_bbox(model)
-    cell = max(hi - lo) * 1.16 / s.surface_resolution
+    # cut face, which both parts share. The cut is made along the model's own
+    # faces now, so the point is *on* the seam rather than near it.
+    diagonal = core.bbox_diagonal(model)
     worst = max(surface_distance(p, dragged) for p in parts)
-    check("both parts touch the dragged point", worst < cell * 1.5,
-          f"max distance {worst:.4f}, one grid cell is {cell:.4f}")
+    check("both parts touch the dragged point", worst < diagonal * 1e-3,
+          f"max distance {worst:.6f} = {worst / diagonal:.4%} of the model")
 
     lower = min(parts, key=lambda p: z_range(p)[0])
     check("cut is no longer flat (lower part bulges upward)",
@@ -488,8 +734,11 @@ def scenario_surface_connectors(core):
     cut = bpy.context.view_layer.objects.active
     cut, _error = surface.convert_to_surface(bpy.context, cut, model,
                                              per_loop=12)
+    # Drag one anchor up the sphere, so the line is no longer flat and the
+    # plane fitted to it is no longer the plane it started on.
     point = cut.pp_points[0]
-    point.co = (point.co[0], point.co[1], 0.35)
+    point.co = model.matrix_world.inverted() @ surface.project_to_surface(
+        model, model.matrix_world @ Vector(point.co) + Vector((0, 0, 0.5)))
     surface.build_display_mesh(cut, model)
 
     bpy.context.view_layer.objects.active = cut
@@ -498,22 +747,21 @@ def scenario_surface_connectors(core):
     check("connectors placed on the surface cut", len(conns) == 2,
           f"got {len(conns)}")
 
-    field = surface.field_for(cut)
-    off = 0.0
-    for conn in conns:
-        local = cut.matrix_world.inverted() @ conn.matrix_world.translation
-        off = max(off, abs(field.eval(local.x, local.y) - local.z))
-    check("connectors sit on the cut surface", off < 1e-4,
+    def off_the_plane(conn):
+        return abs((cut.matrix_world.inverted()
+                    @ conn.matrix_world.translation).z)
+
+    off = max(off_the_plane(c) for c in conns)
+    check("connectors sit on the cut's own plane", off < 1e-4,
           f"max {off:.2e}")
 
-    # Nudge one off the surface, then snap it back.
+    # Nudge one off the plane, then snap it back.
     conns[0].matrix_world.translation += Vector((0.0, 0.0, 0.2))
     bpy.context.view_layer.update()
     moved = surface.snap_connectors(cut)
     check("snap moved the connectors", moved == 2)
-    local = cut.matrix_world.inverted() @ conns[0].matrix_world.translation
-    check("nudged connector snapped back onto the surface",
-          abs(field.eval(local.x, local.y) - local.z) < 1e-4)
+    check("nudged connector snapped back onto the plane",
+          off_the_plane(conns[0]) < 1e-4, f"{off_the_plane(conns[0]):.2e}")
 
     bpy.ops.partpin.create_parts()
     parts = parts_of(s)
@@ -598,7 +846,7 @@ def scenario_surface_from_curve(core):
         return
     check("converted cut is a mesh surface cut",
           cut.type == 'MESH' and cut.pp_cut_kind == 'SURFACE')
-    on_surface = max(surface_distance(model, cut.matrix_world @ Vector(p.co))
+    on_surface = max(surface_distance(model, model.matrix_world @ Vector(p.co))
                      for p in cut.pp_points)
     check("converted points lie on the model surface", on_surface < 5e-3,
           f"max {on_surface:.2e}")
@@ -682,14 +930,14 @@ def scenario_local_leaves_rest_whole(core):
 
     # Drop one sphere's cut line: that sphere should then stay in one piece.
     kept_loop = cut.pp_points[0].loop
-    keep = [(Vector(p.co), p.loop) for p in cut.pp_points
+    keep = [(Vector(p.co), p.face) for p in cut.pp_points
             if p.loop == kept_loop]
-    surface.store_control_points(cut, [c for c, _l in keep],
-                                [0] * len(keep))
+    surface.store_anchors(cut, [c for c, _f in keep], [0] * len(keep),
+                          [f for _c, f in keep])
     check("localized cutting is on by default", cut.pp_local)
     # Which sphere the surviving line encircles (x≈0 or x≈4): the line's
     # centroid, not any single point of it.
-    centre = sum((cut.matrix_world @ co for co, _l in keep),
+    centre = sum((model.matrix_world @ co for co, _f in keep),
                  Vector()) / len(keep)
     fenced_x = 0.0 if centre.x < 2.0 else 4.0
     other_x = 4.0 - fenced_x
@@ -744,8 +992,9 @@ def scenario_local_vs_full(core):
     cut = bpy.context.view_layer.objects.active
     cut, _error = surface.convert_to_surface(bpy.context, cut, model,
                                              per_loop=14)
-    keep = [(Vector(p.co), p.loop) for p in cut.pp_points if p.loop == 0]
-    surface.store_control_points(cut, [c for c, _l in keep], [0] * len(keep))
+    keep = [(Vector(p.co), p.face) for p in cut.pp_points if p.loop == 0]
+    surface.store_anchors(cut, [c for c, _f in keep], [0] * len(keep),
+                          [f for _c, f in keep])
     cut.pp_local = False
 
     bpy.ops.partpin.create_parts()
@@ -782,7 +1031,7 @@ def scenario_local_wide_piece(core):
     check("cut line found around the stalk", cut is not None, str(error))
     if cut is None:
         return
-    polys = surface.loop_polygons(cut)
+    polys = surface.loop_polygons(cut, model)
     span = max(max(u for u, _v in polys[0]) - min(u for u, _v in polys[0]),
                max(v for _u, v in polys[0]) - min(v for _u, v in polys[0]))
     check("cut line is narrow (the stalk)", span < 0.45, f"span {span:.3f}")
@@ -817,14 +1066,14 @@ def scenario_local_seam(core):
     cut, _error = surface.convert_to_surface(bpy.context, cut, model,
                                              per_loop=16)
     point = cut.pp_points[0]
-    start = cut.matrix_world @ Vector(point.co)
+    start = model.matrix_world @ Vector(point.co)
     azimuth = math.atan2(start.y, start.x)
     lat = math.radians(35.0)
     dragged = surface.project_to_surface(
         model, Vector((math.cos(lat) * math.cos(azimuth),
                        math.cos(lat) * math.sin(azimuth),
                        math.sin(lat))))
-    point.co = cut.matrix_world.inverted() @ dragged
+    point.co = model.matrix_world.inverted() @ dragged
     surface.build_display_mesh(cut, model)
 
     bpy.context.view_layer.objects.active = cut
@@ -832,7 +1081,7 @@ def scenario_local_seam(core):
     conns = core.cut_connectors(bpy.context.scene, cut)
     check("connectors placed inside the cut line", len(conns) == 2,
           f"got {len(conns)}")
-    polys = surface.loop_polygons(cut)
+    polys = surface.loop_polygons(cut, model)
     worst_inset = min(
         surface.loop_inset(*(cut.matrix_world.inverted()
                              @ c.matrix_world.translation)[:2], polys)
@@ -862,11 +1111,10 @@ def scenario_local_seam(core):
     check("no material lost at the seam",
           abs(lost) < original_volume * 1e-6,
           f"lost {lost:.5f} of {original_volume:.3f}")
-    lo, hi = core.world_bbox(model)
-    cell = max(hi - lo) * 1.16 / s.surface_resolution
+    diagonal = core.bbox_diagonal(model)
     worst = max(surface_distance(p, dragged) for p in parts)
-    check("seam still runs through the dragged point", worst < cell * 1.5,
-          f"max distance {worst:.4f}, one grid cell is {cell:.4f}")
+    check("seam still runs through the dragged point", worst < diagonal * 1e-3,
+          f"max distance {worst:.6f} = {worst / diagonal:.4%} of the model")
 
     lower = min(parts, key=lambda p: z_range(p)[0])
     check("seam is not flat", z_range(lower)[1] > 0.25,
@@ -887,10 +1135,9 @@ def scenario_local_display(core):
     cut = bpy.context.view_layer.objects.active
     cut, _error = surface.convert_to_surface(bpy.context, cut, model,
                                             per_loop=16)
-    surface.store_control_points(cut, collar_points(surface, model, cut),
-                                [0] * 16)
+    surface.store_anchors(cut, collar_points(surface, model), [0] * 16)
     cut.pp_main_loop = 0
-    surface.refit_frame(cut)
+    surface.frame_to_line(cut, model)
     surface.build_display_mesh(cut, model)
     bpy.context.view_layer.update()  # refresh the cached bounding box
     lo, hi = core.world_bbox(cut)
@@ -898,6 +1145,8 @@ def scenario_local_display(core):
     check("localized preview hugs the collar", local_size < 2.5,
           f"preview spans {local_size:.3f}")
 
+    # With localization off the cut is a plane carrying on past the line, and
+    # the preview says so rather than showing a lid that will not be used.
     cut.pp_local = False
     surface.build_display_mesh(cut, model)
     bpy.context.view_layer.update()
@@ -905,6 +1154,8 @@ def scenario_local_display(core):
     full_size = max(hi2 - lo2)
     check("full-extent preview spans the whole model",
           full_size > local_size * 1.5, f"{full_size:.3f} vs {local_size:.3f}")
+    check("and it is one flat plane", len(cut.data.polygons) == 1,
+          f"{len(cut.data.polygons)} faces")
 
 
 def scenario_delete_loop(core):
@@ -925,7 +1176,7 @@ def scenario_delete_loop(core):
 
     cls = shape_edit.PARTPIN_OT_edit_cut_surface
     op = types.SimpleNamespace()
-    for name in ('_rebuild_cache', '_rebuild_cap', '_delete_loop'):
+    for name in ('_rebuild_cache', '_rebuild_cap', '_delete_loop', '_store'):
         setattr(op, name, getattr(cls, name).__get__(op))
     op.cut, op.target = cut, model
     op.hover, op.dragging, op.moved, op._cache = -1, -1, False, None
@@ -982,16 +1233,17 @@ def make_limb(core):
     return obj
 
 
-def collar_points(surface_mod, model, cut, x=2.0, radius=0.55, count=16):  # noqa: E501
-    """A cut line dragged right round the limb — a loop that ends up nearly
-    perpendicular to the plane the cut started on."""
+def collar_points(surface_mod, model, cut=None, x=2.0, radius=0.55, count=16):  # noqa: E501
+    """A cut line dragged right round the limb, as anchors in model space —
+    a loop lying nearly perpendicular to the plane the cut started on."""
     points = []
+    inverse = model.matrix_world.inverted()
     for i in range(count):
         angle = 2.0 * math.pi * i / count
         world = surface_mod.project_to_surface(
             model, Vector((x, radius * math.cos(angle),
                            radius * math.sin(angle))))
-        points.append(cut.matrix_world.inverted() @ world)
+        points.append(inverse @ world)
     return points
 
 
@@ -1011,24 +1263,26 @@ def scenario_collar_cut(core):
     before = cut.matrix_world.to_quaternion() @ Vector((0.0, 0.0, 1.0))
     check("cut starts out normal to Z", abs(before.z) > 0.99)
 
-    surface.store_control_points(cut, collar_points(surface, model, cut),
-                                [0] * 16)
-    flat = max(surface.polygon_roundness(p)
-               for p in surface.loop_polygons(cut))
-    check("collar is degenerate in the original plane (the bug)", flat < 0.01,
-          f"roundness {flat:.4f}")
-
-    surface.refit_frame(cut)
-    after = cut.matrix_world.to_quaternion() @ Vector((0.0, 0.0, 1.0))
-    check("re-fitted plane now faces along the limb", abs(after.x) > 0.99,
-          f"normal {tuple(round(v, 2) for v in after)}")
-    round_now = max(surface.polygon_roundness(p)
-                    for p in surface.loop_polygons(cut))
-    check("collar encloses a proper area after re-fitting", round_now > 0.8,
-          f"roundness {round_now:.4f}")
+    # Drag the line right round the limb. The anchors are on the model, so
+    # the line is a collar the moment they are stored — there is no plane to
+    # re-fit, and nothing about the cut it grew out of is left in it.
+    surface.store_anchors(cut, collar_points(surface, model), [0] * 16)
     check("no problem reported for the collar",
-          surface.cut_line_problem(cut) is None,
-          str(surface.cut_line_problem(cut)))
+          surface.cut_line_problem(cut, model) is None,
+          str(surface.cut_line_problem(cut, model)))
+    ring = surface.line_rings(cut, model)[0]
+    check("the collar is a ring right round the limb",
+          max(p.x for p in ring) - min(p.x for p in ring) < 0.4
+          and max(p.z for p in ring) - min(p.z for p in ring) > 0.7,
+          f"spans x {max(p.x for p in ring) - min(p.x for p in ring):.2f}, "
+          f"z {max(p.z for p in ring) - min(p.z for p in ring):.2f}")
+
+    # The cut's own frame follows it, which is what its connectors and the
+    # "cut right through" mode hang off.
+    surface.frame_to_line(cut, model)
+    after = cut.matrix_world.to_quaternion() @ Vector((0.0, 0.0, 1.0))
+    check("the cut's frame now faces along the limb", abs(after.x) > 0.99,
+          f"normal {tuple(round(v, 2) for v in after)}")
 
     failures = []
     parts, _applied, _warnings = core.create_parts(
@@ -1049,9 +1303,9 @@ def scenario_collar_cut(core):
 
 
 def scenario_collar_full_extent(core):
-    """The same line with localization off should follow the line's plane,
-    not the plane the cut happened to start on."""
-    print("Scenario: re-fitting also fixes full-extent cuts")
+    """The same line with localization off cuts through on the line's own
+    plane, not the plane the cut happened to start on."""
+    print("Scenario: a full-extent cut follows the line's own plane")
     reset_scene()
     s = bpy.context.scene.part_pin
     model = make_limb(core)
@@ -1062,8 +1316,7 @@ def scenario_collar_full_extent(core):
     cut = bpy.context.view_layer.objects.active
     cut, _error = surface.convert_to_surface(bpy.context, cut, model,
                                             per_loop=16)
-    surface.store_control_points(cut, collar_points(surface, model, cut),
-                                [0] * 16)
+    surface.store_anchors(cut, collar_points(surface, model), [0] * 16)
     cut.pp_local = False
 
     failures = []
@@ -1084,8 +1337,9 @@ def scenario_collar_full_extent(core):
 
 def scenario_collar_plus_leftover_line(core):
     """A plane cut picks up a line on every feature it crosses. Reshaping one
-    into a collar leaves the others in a different plane — the collar should
-    still cut, with the leftovers reported rather than silently dropped."""
+    into a collar used to leave the others in a different plane, and they were
+    dropped with a warning. There is no shared plane now, so every line is
+    cut — and a line the user does not want is theirs to remove."""
     print("Scenario: collar plus a leftover line from another feature")
     reset_scene()
     s = bpy.context.scene.part_pin
@@ -1097,35 +1351,25 @@ def scenario_collar_plus_leftover_line(core):
     cut = bpy.context.view_layer.objects.active
     cut, _error = surface.convert_to_surface(bpy.context, cut, model,
                                             per_loop=16)
-    # Line 0 becomes the collar; line 1 is a leftover lengthwise line.
-    collar = collar_points(surface, model, cut)
-    leftover = []
-    for i in range(10):
-        angle = 2.0 * math.pi * i / 10
-        world = surface.project_to_surface(
-            model, Vector((-1.0 + 0.8 * math.cos(angle),
-                           0.42 * math.sin(angle), 0.0)))
-        leftover.append(cut.matrix_world.inverted() @ world)
-    surface.store_control_points(cut, collar + leftover,
-                                [0] * 16 + [1] * 10)
+    # Line 0 is the collar; line 1 is a second collar further down the limb,
+    # lying in a plane at a good angle to the first.
+    collar = collar_points(surface, model, x=2.0)
+    second = collar_points(surface, model, x=-1.0, radius=0.5)
+    surface.store_anchors(cut, collar + second, [0] * 16 + [1] * 16)
     cut.pp_main_loop = 0  # the collar is what the user was editing
 
-    surface.refit_frame(cut)
-    usable, problem, warning = surface.loop_quality(cut)
-    check("only the collar survives as usable", usable == [0],
+    usable = surface.usable_loop_indices(cut)
+    check("both lines are kept, whatever plane they lie in", usable == [0, 1],
           f"usable lines {usable}")
-    check("no hard failure", problem is None, str(problem))
-    check("the leftover line is reported",
-          warning is not None and "Alt+X" in warning, str(warning))
+    check("no hard failure", surface.cut_line_problem(cut, model) is None,
+          str(surface.cut_line_problem(cut, model)))
 
     failures = []
-    warns = []
     parts, _applied, warns = core.create_parts(
         bpy.context, model, [cut], keep_original=True, failures=failures)
-    check("the collar still cuts", len(parts) == 2,
+    check("both lines cut, giving three parts", len(parts) == 3,
           f"got {len(parts)}: {failures}")
-    check("the ignored line comes through as a warning",
-          any("ignored" in w for w in warns), str(warns))
+    check("and nothing is warned about", not warns, str(warns))
     for p in parts:
         check(f"part closed: {p.name}", is_closed(core, p))
 
@@ -1201,7 +1445,6 @@ def collar_cut(core, surface_mod, model, per_loop=16, radius=0.75, x=2.0):
     if cut is None:
         return None
     cut.pp_main_loop = 0
-    surface_mod.refit_frame(cut)
     bpy.context.view_layer.objects.active = cut
     return cut
 
@@ -1247,10 +1490,11 @@ def make_shoulder_arm(core):
     return body, base, axis
 
 
-def collar_stroke(surface_mod, model, centre, axis, count=90):
+def collar_stroke(surface_mod, model, centre, axis, count=90, reach=4.0):
     """A collar drawn round a limb: rays fired inward at its axis, which is
     what drawing round it in the viewport produces."""
-    across = axis.cross(Vector((0, 1, 0))).normalized()
+    up = Vector((0, 1, 0)) if abs(axis.y) < 0.9 else Vector((1, 0, 0))
+    across = axis.cross(up).normalized()
     other = axis.cross(across).normalized()
     obj = surface_mod.evaluated(model)
     inverse = obj.matrix_world.inverted()
@@ -1260,11 +1504,40 @@ def collar_stroke(surface_mod, model, centre, axis, count=90):
         radial = (math.cos(angle) * across
                   + math.sin(angle) * other).normalized()
         hit, location, _n, _i = obj.ray_cast(
-            inverse @ (centre + radial * 4.0),
+            inverse @ (centre + radial * reach),
             inverse.to_3x3() @ (-radial))
         if hit:
             points.append(obj.matrix_world @ location)
     return points
+
+
+def make_dense_mesh(around=940, round_it=470, major=60.0, minor=20.0):
+    """A closed, manifold model with as many faces as the user's sculpt.
+
+    Built straight into the mesh from numpy arrays: asking bmesh for a sphere
+    this dense takes over a minute, and this takes a fifth of a second.
+    """
+    import numpy as np
+    theta = np.arange(around) * (2.0 * np.pi / around)
+    phi = np.arange(round_it) * (2.0 * np.pi / round_it)
+    T, P = np.meshgrid(theta, phi, indexing='ij')
+    co = np.stack([(major + minor * np.cos(P)) * np.cos(T),
+                   (major + minor * np.cos(P)) * np.sin(T),
+                   minor * np.sin(P)], axis=-1).reshape(-1, 3)
+    grid = np.arange(around * round_it).reshape(around, round_it)
+    quads = np.stack([grid, np.roll(grid, -1, axis=0),
+                      np.roll(np.roll(grid, -1, axis=0), -1, axis=1),
+                      np.roll(grid, -1, axis=1)], axis=-1).reshape(-1, 4)
+    mesh = bpy.data.meshes.new("Dense")
+    mesh.vertices.add(len(co))
+    mesh.vertices.foreach_set("co", co.ravel())
+    mesh.loops.add(len(quads) * 4)
+    mesh.polygons.add(len(quads))
+    mesh.loops.foreach_set("vertex_index", quads.ravel().astype(np.int32))
+    mesh.polygons.foreach_set("loop_start",
+                              (np.arange(len(quads)) * 4).astype(np.int32))
+    mesh.update()
+    return mesh
 
 
 def scenario_arm_at_shoulder(core):
@@ -1288,7 +1561,7 @@ def scenario_arm_at_shoulder(core):
     # The cut spans the line and nothing beyond it: measured as the lid's
     # extent against the line's own.
     tris = surface.cap_preview_tris(cut, model)
-    line = [cut.matrix_world @ Vector(p.co) for p in cut.pp_points]
+    line = [model.matrix_world @ Vector(p.co) for p in cut.pp_points]
     for axis in range(3):
         reach = max(p[axis] for p in tris) - min(p[axis] for p in tris)
         drawn = max(p[axis] for p in line) - min(p[axis] for p in line)
@@ -1415,11 +1688,13 @@ def scenario_check_line_operator(core):
     cut = collar_cut(core, surface, model)
     check("operator is registered",
           hasattr(bpy.ops.partpin, "check_cut_line"))
-    before = (cut.pp_undercut, len(cut.pp_points))
+    before = ([tuple(p.co) for p in cut.pp_points],
+              cut.matrix_world.copy())
     bpy.ops.partpin.check_cut_line()
-    check("checking changes nothing",
-          (cut.pp_undercut, len(cut.pp_points)) == before,
-          f"{before} → {(cut.pp_undercut, len(cut.pp_points))}")
+    after = ([tuple(p.co) for p in cut.pp_points], cut.matrix_world.copy())
+    check("checking changes nothing about the line",
+          after[0] == before[0] and after[1] == before[1],
+          f"{len(before[0])} points before, {len(after[0])} after")
     failures = []
     parts, _applied, _warns = core.create_parts(
         bpy.context, model, [cut], keep_original=True, failures=failures)
@@ -1441,21 +1716,28 @@ def scenario_unusable_line_reports(core):
     # Collapse the line onto a straight path along the limb: it doubles back
     # on itself and fences no region at all.
     points = []
+    inverse = model.matrix_world.inverted()
     for i in range(12):
         t = i / 11.0 if i < 6 else (11 - i) / 11.0
         world = surface.project_to_surface(
             model, Vector((-2.5 + 5.0 * t, 0.0, 0.45)))
-        points.append(cut.matrix_world.inverted() @ world)
-    surface.store_control_points(cut, points, [0] * 12)
+        points.append(inverse @ world)
+    surface.store_anchors(cut, points, [0] * 12)
 
-    problem = surface.cut_line_problem(cut)
-    check("unusable line is reported, not silently ignored",
-          problem is not None and "enclose" in problem, str(problem))
+    # Nothing is guessed at up front: whether a line encloses anything is a
+    # question about the model, and it is answered by making the cut.
+    check("the line itself is not called unusable in advance",
+          surface.cut_line_problem(cut, model) is None,
+          str(surface.cut_line_problem(cut, model)))
 
     failures = []
     parts, _applied, _warnings = core.create_parts(
         bpy.context, model, [cut], keep_original=True, failures=failures)
     check("create_parts surfaces the reason", len(failures) == 1,
+          str(failures))
+    check("and the reason says what to do about it",
+          failures and ("ring-fence" in failures[0]
+                        or "shorter way round" in failures[0]),
           str(failures))
     # Nothing is made at all, rather than a "parts" collection holding one
     # copy of the model: the cut has to stay put and stay editable, and having
@@ -1564,7 +1846,7 @@ def scenario_gap_is_bridged_along_surface(core):
     the model, not straight through it."""
     print("Scenario: a gap in the drawing is carried across the surface")
     reset_scene()
-    from part_pin import draw_cut, surface
+    from part_pin import draw_cut
     s = bpy.context.scene.part_pin
     model = make_cube_model(core)
     s.target = model
@@ -1770,13 +2052,12 @@ def scenario_draw_then_adjust(core):
     # head, so it stays on the surface — dragging in the viewport ray-casts
     # onto visible surface and cannot bury a point inside the model.
     point = cut.pp_points[0]
-    world = cut.matrix_world @ Vector(point.co)
+    world = model.matrix_world @ Vector(point.co)
     moved = surface.project_to_surface(model, world + Vector((-0.25, 0, 0)))
     check("the nudged point is on the model surface",
           surface_distance(model, moved) < 1e-3,
           f"{surface_distance(model, moved):.2e}")
-    point.co = cut.matrix_world.inverted() @ moved
-    surface.refit_frame(cut)
+    point.co = model.matrix_world.inverted() @ moved
     surface.build_display_mesh(cut, model)
 
     failures = []
@@ -1810,15 +2091,24 @@ def scenario_draw_cut_rejections(core):
           error and "too short" in error, str(error))
 
     # A stroke that runs along the limb instead of round it encloses nothing.
+    # It is not turned away at the door — whether a line encloses anything is
+    # a question about the model, not about how the loop looks flattened onto
+    # some plane, and guessing at it is what used to refuse lines that worked.
+    # The cut is made, and it is the cut that says so.
     along = [surface.project_to_surface(model, Vector((x, 0.0, 0.45)))
              for x in [-2.0 + 0.1 * i for i in range(40)]]
     along += list(reversed(along))
     cut, error = surface.cut_from_stroke(bpy.context, model, along,
                                         per_loop=16)
-    check("a stroke that doubles back is refused", cut is None, str(error))
-    check("the reason is actionable", error and ("enclose" in error
-                                                or "crosses itself" in error),
+    check("a stroke that doubles back is taken as drawn", cut is not None,
           str(error))
+    if cut is not None:
+        failures = []
+        parts, _applied, _warns = core.create_parts(
+            bpy.context, model, [cut], keep_original=True, failures=failures)
+        check("and the cut is what reports it cannot be made",
+              not parts and len(failures) == 1,
+              f"{len(parts)} parts: {failures}")
 
 
 def scenario_draw_operator_registered(core):
@@ -1853,18 +2143,7 @@ def scenario_lid_reaches_the_line(core):
     cut = collar_cut(core, surface, model, per_loop=10)
     diagonal = core.bbox_diagonal(model)
 
-    field = surface.field_for(cut)
-    matrix = cut.matrix_world
-    line = []
-    for loop in surface.control_loops(cut):
-        for i, a in enumerate(loop):
-            b = loop[(i + 1) % len(loop)]
-            for k in range(8):
-                t = k / 8.0
-                u, v = a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t
-                line.append(surface.project_to_surface(
-                    model, matrix @ Vector((u, v, field.eval(u, v)))))
-
+    line = [p for ring in surface.line_rings(cut, model) for p in ring]
     tris = surface.cap_preview_tris(cut, model)
     check("the lid is built", len(tris) >= 3, f"{len(tris) // 3} triangles")
     corners = [Vector(p) for p in tris]
@@ -1933,7 +2212,7 @@ def scenario_seam_lands_on_the_line(core):
     from part_pin import surface
 
     def measure(label, model, cut, allow):
-        rings, _normals, _normal, _settle = surface.line_rings(cut, model)
+        rings = surface.line_rings(cut, model)
         check(f"{label}: the line is there to check", bool(rings))
         if not rings:
             return
@@ -2092,7 +2371,7 @@ def scenario_a_seam_repairs_itself(core):
     from part_pin import mesh_cut, surface
 
     def mend(label, model, cut):
-        rings, normals, _normal, _settle = surface.line_rings(cut, model)
+        rings, normals = mesh_cut.line_rings(cut, model)
         thin = core.bbox_diagonal(model) * mesh_cut.BAND_LADDER[0]
         flat = mesh_cut._uniform(rings, thin)
         work = core.duplicate_object(model, "Probe",
@@ -2101,8 +2380,14 @@ def scenario_a_seam_repairs_itself(core):
                                              bpy.context.scene)
         core.remove_object(work)
         if found is not None:
+            # Nothing to mend. Since the line started being walked across the
+            # model's own faces rather than projected onto it, the thinnest
+            # band clears some creases that used to break it — so what is
+            # checked here is that a repair is not invented for a seam that
+            # closed.
             found[0].free()
-            check(f"{label}: the thin band was meant to fail", False)
+            check(f"{label}: a seam that closed is left alone",
+                  mesh_cut._repaired(rings, flat, []) is None)
             return
         check(f"{label}: a band this thin comes apart", len(loose) > 0,
               f"{len(loose)} loose ends")
@@ -2218,10 +2503,9 @@ def scenario_line_hugs_surface(core):
     # Pull a point well away, so the cut's own surface wanders off the model
     # between the points — where the line used to leave the surface.
     point = cut.pp_points[0]
-    world = cut.matrix_world @ Vector(point.co)
-    point.co = cut.matrix_world.inverted() @ surface.project_to_surface(
+    world = model.matrix_world @ Vector(point.co)
+    point.co = model.matrix_world.inverted() @ surface.project_to_surface(
         model, world + Vector((-0.5, 0.0, 0.0)))
-    surface.refit_frame(cut)
 
     cls = shape_edit.PARTPIN_OT_edit_cut_surface
     op = types.SimpleNamespace()
@@ -2251,9 +2535,9 @@ def scenario_line_hugs_surface(core):
           f"{min(offsets):.4f}..{max(offsets):.4f}, expected {expected:.4f}")
 
     check("the cut itself does not move with the lift",
-          max(surface_distance(model, cut.matrix_world @ Vector(p.co))
+          max(surface_distance(model, model.matrix_world @ Vector(p.co))
               for p in cut.pp_points) < diagonal * 1e-4,
-          "control points left the surface")
+          "anchors left the surface")
 
     # The cut still works, and lands where the line is — not where it is drawn.
     s.line_lift = 0.0015
@@ -2284,7 +2568,7 @@ def scenario_cap_preview(core):
         return ([min(p[i] for p in points) for i in range(3)],
                 [max(p[i] for p in points) for i in range(3)])
 
-    line = [cut.matrix_world @ Vector(p.co) for p in cut.pp_points]
+    line = [model.matrix_world @ Vector(p.co) for p in cut.pp_points]
     cap_lo, cap_hi = bounds(tris)
     line_lo, line_hi = bounds(line)
     span = max(line_hi[i] - line_lo[i] for i in range(3))
@@ -2297,32 +2581,31 @@ def scenario_cap_preview(core):
 
     # It follows the line: move a point and the surface moves with it.
     point = cut.pp_points[0]
-    world = cut.matrix_world @ Vector(point.co)
+    world = model.matrix_world @ Vector(point.co)
     moved = surface.project_to_surface(model, world + Vector((-0.4, 0, 0)))
-    point.co = cut.matrix_world.inverted() @ moved
+    point.co = model.matrix_world.inverted() @ moved
     after = surface.cap_preview_tris(cut, model)
     check("the surface follows the point",
           bounds(after)[0][0] < cap_lo[0] - 0.1,
           f"reached x {bounds(after)[0][0]:.2f}, was {cap_lo[0]:.2f}")
 
-    # And it is the surface that cuts: the cutter is built from the same lid.
-    cap, problem, _warning = surface.build_cap_slab(cut, model)
-    check("the cutter is built from it", cap is not None, str(problem))
-    if cap is None:
-        return
-    cutter_lo, cutter_hi = core.world_bbox(cap)
-    preview_lo, preview_hi = bounds(after)
-    # The cutter is the same lid, with its rim put on the surface and stepped
-    # out through it, so the two differ by about that much and no more.
-    check("cutter and preview agree",
-          all(abs(cutter_lo[i] - preview_lo[i]) < span * 0.3
-              and abs(cutter_hi[i] - preview_hi[i]) < span * 0.3
-              for i in range(3)),
-          f"cutter {[round(x, 2) for x in cutter_lo]}.."
-          f"{[round(x, 2) for x in cutter_hi]} vs preview "
-          f"{[round(x, 2) for x in preview_lo]}.."
-          f"{[round(x, 2) for x in preview_hi]}")
-    core.remove_object(cap)
+    # And it is the very surface that cuts: the preview is the cutter's own
+    # cap plan, laid over the line, rather than something built alongside it.
+    from part_pin import mesh_cut
+    plans = surface.cap_geometry(cut, model)
+    check("the preview is one plan per line", len(plans) == 1,
+          f"{len(plans)} plans")
+    points, tris_of = plans[0]
+    line = surface.line_rings(cut, model)[0]
+    rim = points[:len(line)]
+    check("its rim is the line itself, point for point",
+          len(line) <= surface.PREVIEW_RING
+          and all((p - q).length < 1e-9 for p, q in zip(rim, line)),
+          f"{len(line)} samples against a rim of {len(rim)}")
+    extra, plan = mesh_cut._cap_plan(rim, surface.ring_plane(rim)[1])
+    check("and it is the cutter's own plan, not a copy of one",
+          plan == tris_of and len(points) == len(rim) + len(extra),
+          f"{len(plan)} triangles against {len(tris_of)}")
 
 
 def scenario_cut_object_shows_the_lid(core):
@@ -2339,7 +2622,7 @@ def scenario_cut_object_shows_the_lid(core):
     check("the cut object has a surface", len(cut.data.polygons) > 8,
           f"{len(cut.data.polygons)} faces")
     lo, hi = core.world_bbox(cut)
-    line = [cut.matrix_world @ Vector(p.co) for p in cut.pp_points]
+    line = [model.matrix_world @ Vector(p.co) for p in cut.pp_points]
     line_span = max(max(p[i] for p in line) - min(p[i] for p in line)
                     for i in range(3))
     check("it hugs the line rather than spanning the model",
@@ -2396,8 +2679,8 @@ def scenario_inspection_marks(core):
     s.target = model
     cut = collar_cut(core, surface, model)
     for point in cut.pp_points:
-        world = cut.matrix_world @ Vector(point.co)
-        point.co = cut.matrix_world.inverted() @ (world * 1.6)
+        world = model.matrix_world @ Vector(point.co)
+        point.co = model.matrix_world.inverted() @ (world * 1.6)
     found = surface.inspect_cut(cut, model)
     check("a line off the model is marked as adrift",
           len(found[surface.ADRIFT]) > 0,
@@ -2523,7 +2806,7 @@ def scenario_modal_helpers(core):
     cls = shape_edit.PARTPIN_OT_edit_cut_surface
     op = types.SimpleNamespace()
     for name in ('_rebuild_cache', '_rebuild_cap', '_insert_point',
-                 '_delete_point',
+                 '_delete_point', '_store',
                  '_nearest_point', '_surface_hit'):
         setattr(op, name, getattr(cls, name).__get__(op))
     op.cut, op.target = cut, model
@@ -2533,42 +2816,43 @@ def scenario_modal_helpers(core):
     op._rebuild_cache()
     check("cache holds one cut line", len(op._cache['polylines']) == 1)
     line = op._cache['polylines'][0]
-    check("cut line is densified and closed",
-          len(line) == 12 * shape_edit.SEGMENT_SUBDIV + 1
-          and (line[0] - line[-1]).length < 1e-9, f"{len(line)} points")
+    check("cut line is walked out and closed",
+          len(line) > 12 and (line[0] - line[-1]).length < 1e-9,
+          f"{len(line)} points")
+    # Drawn lifted clear of the surface, so it is not swallowed by it.
+    lift = core.bbox_diagonal(model) * s.line_lift
     off = max(surface_distance(model, p) for p in line)
-    check("drawn cut line hugs the model surface", off < 0.02,
-          f"max {off:.4f}")
-    check("one world position per control point",
-          len(op._cache['world']) == 12)
+    check("drawn cut line hugs the model surface, at the lift it is drawn at",
+          abs(off - lift) < max(lift, 1e-6) * 0.05 + 1e-6,
+          f"max {off:.5f}, lift {lift:.5f}")
+    check("one world position per anchor", len(op._cache['world']) == 12)
 
     # Ctrl+click insert: the new point must land on the surface, in a loop.
     hit = surface.project_to_surface(model, Vector((1.0, 0.02, 0.0)))
-    op._surface_hit = lambda context, mouse: hit
+    op._surface_hit = lambda context, mouse: (hit, -1)
     op._insert_point(bpy.context, (0, 0))
-    check("insert added a control point", len(cut.pp_points) == 13,
+    check("insert added an anchor", len(cut.pp_points) == 13,
           f"got {len(cut.pp_points)}")
-    worst = max(surface_distance(model, cut.matrix_world @ Vector(p.co))
+    worst = max(surface_distance(model, model.matrix_world @ Vector(p.co))
                 for p in cut.pp_points)
-    check("all points still on the model surface", worst < 1e-3,
+    check("all anchors still on the model surface", worst < 1e-3,
           f"max {worst:.2e}")
     check("inserted point kept the loop id",
           {p.loop for p in cut.pp_points} == {0})
     inserted = min(range(len(cut.pp_points)),
-                   key=lambda i: ((cut.matrix_world
+                   key=lambda i: ((model.matrix_world
                                    @ Vector(cut.pp_points[i].co)) - hit).length)
     check("inserted point is adjacent to its neighbours in storage order",
           0 < inserted < 13)
 
     op.hover = 0
     op._delete_point(0)
-    check("delete removed a control point", len(cut.pp_points) == 12,
+    check("delete removed an anchor", len(cut.pp_points) == 12,
           f"got {len(cut.pp_points)}")
 
     # Guard: never shrink a loop below 3 points.
-    keep = [(Vector(p.co), p.loop) for p in cut.pp_points][:3]
-    surface.store_control_points(cut, [c for c, _l in keep],
-                                [l for _c, l in keep])
+    keep = [(Vector(p.co), p.loop, p.face) for p in cut.pp_points][:3]
+    op._store(keep)
     op._delete_point(0)
     check("refuses to delete below 3 points", len(cut.pp_points) == 3,
           f"got {len(cut.pp_points)}")
@@ -2597,7 +2881,10 @@ def main():
     scenario_custom_connector(core)
     scenario_flip_pin(core)
     scenario_validation(core)
-    scenario_height_field(core)
+    scenario_the_walker(core)
+    scenario_the_line_holds_its_contour(core)
+    scenario_dragging_stays_local(core)
+    scenario_no_line_is_ever_skipped(core)
     scenario_surface_convert(core)
     scenario_surface_drag(core)
     scenario_surface_connectors(core)

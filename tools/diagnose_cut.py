@@ -2,6 +2,10 @@
 
     ./.venv-bpy/bin/python tools/diagnose_cut.py <file.blend> [cut name]
 
+or, against an installed Blender:
+
+    blender --background --python tools/diagnose_cut.py -- <file.blend> [cut]
+
 Reports the model, the line, and then every band the cutter would try, with
 what each one left behind — so a cut that fails says which of the three ways
 it failed and where, rather than only that it did.
@@ -49,17 +53,19 @@ def mesh_report(obj, label):
 def line_report(cut, target):
     print(f"\ncut: {cut.name}")
     print(f"    kind {cut.pp_cut_kind}, local {bool(cut.pp_local)}, "
-          f"{len(cut.pp_points)} control point(s), "
-          f"{len(surface.control_loops(cut))} line(s)")
+          f"{len(cut.pp_points)} anchor(s), "
+          f"{len(surface.anchor_loops(cut))} line(s)")
     if not surface.is_local(cut):
         print("    *** not a localized surface cut, so the new cutter is not "
               "what runs for it. 'Cut Inside Line Only' has to be on.")
-    problem = surface.cut_line_problem(cut)
+    problem = surface.cut_line_problem(cut, target)
     if problem:
         print(f"    *** the line itself is unusable: {problem}")
         return None
 
-    rings, normals, normal, settle = surface.line_rings(cut, target)
+    quality_report(cut, target)
+
+    rings, normals = mesh_cut.line_rings(cut, target)
     if rings is None:
         print("    *** no line to cut along")
         return None
@@ -69,13 +75,47 @@ def line_report(cut, target):
                 for k, p in enumerate(ring)]
         off = max(surface.surface_gap(target, p) for p in ring)
         print(f"    line {i}: {len(ring)} samples, length "
-               f"{surface.loop_length(ring):.4f}, spacing "
-               f"{min(gaps):.5f}..{max(gaps):.5f}, "
-               f"furthest off the surface {off / diagonal:.4%} of the model")
-    return rings, normals, normal, settle
+              f"{surface.loop_length(ring):.4f}, spacing "
+              f"{min(gaps):.5f}..{max(gaps):.5f}, "
+              f"furthest off the surface {off / diagonal:.4%} of the model")
+    return rings, normals
 
 
-def try_every_band(target, cut, rings, normals, normal, settle):
+def quality_report(cut, target):
+    """The four numbers the line is judged on.
+
+    A line that holds what was drawn is on the model everywhere, does not
+    stray from the polyline through its own anchors, is walked at an even
+    spacing, and has no hairpins in it. Everything the rework is for shows up
+    in these four.
+    """
+    found = surface.line_quality(cut, target)
+    diagonal = found['diagonal']
+    print("\nline quality:")
+    print(f"    {found['lines']} line(s), {found['samples']} sample(s) "
+          f"on a model {diagonal:.3f} across")
+    print(f"    off the model's surface: {found['off_surface']:.6f} "
+          f"= {found['off_surface'] / diagonal:.4%} of the model")
+    print(f"    away from the polyline through its own anchors: "
+          f"{found['off_anchors']:.6f} = "
+          f"{found['off_anchors'] / diagonal:.4%} of the model")
+    low, high = found['spacing']
+    print(f"    spacing {low:.6f}..{high:.6f}"
+          + (f" ({high / low:.1f}x spread)" if low > 1e-12 else ""))
+    print(f"    hairpins: {found['hairpins']}")
+    if found['broken']:
+        print(f"    *** {found['broken']} span(s) could not be walked across "
+              "the surface at all")
+    if found['off_surface'] > diagonal * 1e-4:
+        print("    *** the line is off the model. It is walked across the "
+              "surface, so this should not happen — the model may have "
+              "changed under it.")
+    if found['hairpins']:
+        print("    *** hairpins: the line doubles back on itself, and there "
+              "is no room to cut between the two sides.")
+
+
+def try_every_band(target, cut, rings, normals):
     """Walk the same bands the cutter would, reporting each."""
     diagonal = core.bbox_diagonal(target)
     was = core.mesh_issues(target)
@@ -127,8 +167,8 @@ def try_every_band(target, cut, rings, normals, normal, settle):
             print(f"  {what}: seam closed ({len(seam)} edges), "
                   f"regions {sorted(regions, reverse=True)[:4]}")
             try:
-                pieces = mesh_cut._part_and_cap(bm, layer, seam, normal, scene,
-                                                scene.collection, settle)
+                pieces = mesh_cut._part_and_cap(bm, layer, seam, scene,
+                                                scene.collection)
             except Exception as exc:
                 print(f"      *** could not part and cap it: "
                       f"{type(exc).__name__}: {exc}")
@@ -161,11 +201,15 @@ def try_every_band(target, cut, rings, normals, normal, settle):
 
 
 def main():
-    if len(sys.argv) < 2:
+    # Run by a Blender that was given the file on its own command line, the
+    # arguments meant for this are the ones after a bare `--`.
+    args = (sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv
+            else sys.argv[1:])
+    if not args:
         print(__doc__)
         return 2
-    path = sys.argv[1]
-    wanted = sys.argv[2] if len(sys.argv) > 2 else None
+    path = args[0]
+    wanted = args[1] if len(args) > 1 else None
 
     part_pin.register()
     bpy.ops.wm.open_mainfile(filepath=path)

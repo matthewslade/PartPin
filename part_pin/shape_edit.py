@@ -21,23 +21,23 @@ TROUBLE_COLORS = {
     surface.STUCK: (1.0, 0.15, 0.15, 1.0),    # red: the cut cannot get through
     surface.PINCHED: (1.0, 0.35, 0.85, 1.0),  # pink: the line doubles back
     surface.ADRIFT: (1.0, 0.95, 0.30, 1.0),   # yellow: line off the model
+    surface.BROKEN: (0.35, 0.75, 1.0, 1.0),   # blue: the line cannot get across
 }
 TROUBLE_LABELS = {
     surface.STUCK: "red = the cut cannot get through here",
     surface.PINCHED: "pink = the line doubles back on itself",
     surface.ADRIFT: "yellow = off the model",
+    surface.BROKEN: "blue = the line cannot get across the model here",
 }
 CAP_COLOR = (1.0, 0.62, 0.16, 0.16)       # the lid that will do the cutting
-CAP_COLOR_EDGE = (1.0, 0.72, 0.30, 0.5)
 POINT_HOVER = (1.0, 0.95, 0.35, 1.0)
 POINT_ACTIVE = (0.35, 1.0, 0.45, 1.0)
 
 HIT_RADIUS_PX = 20
-SEGMENT_SUBDIV = 8
 
 STATUS = ("Drag points — the shaded surface is the cut    "
           "Ctrl+Click: add point    X: remove point    "
-          "Alt+X: remove whole line    Ctrl+Wheel: falloff    "
+          "Alt+X: remove whole line    "
           "T: try the cut    Enter: confirm    Esc: cancel")
 
 
@@ -121,11 +121,10 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
             return {'CANCELLED'}
 
         self.cut = cut
-        # Points are stored in the cut's own space and re-fitting moves that
-        # space, so the snapshot has to remember the frame it belongs to.
-        self.snapshot = [(Vector(p.co), p.loop) for p in cut.pp_points]
+        # Anchors are in the model's own space, so a snapshot of them is all
+        # that is needed to put the line back exactly as it was found.
+        self.snapshot = [(Vector(p.co), p.loop, p.face) for p in cut.pp_points]
         self.snapshot_matrix = cut.matrix_world.copy()
-        self.falloff_start = cut.pp_falloff
         self.was_hidden = cut.hide_get()
         cut.hide_set(True)  # only the cut line should be visible
 
@@ -164,7 +163,7 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         enclosing a cuttable region, rather than at Create Parts time."""
         problem = None
         if self.cut.pp_local:
-            problem = surface.cut_line_problem(self.cut)
+            problem = surface.cut_line_problem(self.cut, self.target)
         if problem:
             context.workspace.status_text_set(
                 "CANNOT CUT: " + problem.split(' — ')[0] + "    " + STATUS)
@@ -269,14 +268,14 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
             self._cap_tris = []
 
     def _rebuild_cache(self):
-        """Recompute the drawable cut line and the world control points.
+        """Recompute the drawable cut line and the world anchor positions.
 
         The line comes from the one definition of where it lies on the model,
-        the same one the cutting surface is built from, lifted clear so the
-        surface it lies on cannot swallow it.
+        the same one the cut is made along, lifted clear so the surface it
+        lies on cannot swallow it.
         """
         cut = self.cut
-        matrix = cut.matrix_world
+        matrix = self.target.matrix_world
         model = surface.evaluated(self.target)
         inv_target = model.matrix_world.inverted()
         normal_matrix = model.matrix_world.to_3x3()
@@ -284,40 +283,30 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
                 * core.get_settings(bpy.context).line_lift)
 
         polylines = []
-        for ring in surface.line_samples(cut, self.target, lift=lift):
+        for ring in surface.line_rings(cut, self.target, lift=lift):
             polylines.append(ring + [ring[0]])
 
-        def lifted(point):
-            ok, near, normal, _index = model.closest_point_on_mesh(
-                inv_target @ point)
-            if not ok:
-                return point
-            surfaced = model.matrix_world @ near
-            outward = normal_matrix @ normal
-            if lift > 0.0 and outward.length > 1e-9:
-                surfaced = surfaced + outward.normalized() * lift
-            return surfaced
-
+        world = [matrix @ Vector(p.co) for p in cut.pp_points]
         self._cache = {
-            'field': surface.field_for(cut),
             'polylines': polylines,
-            'world': [matrix @ Vector(p.co) for p in cut.pp_points],
-            'drawn': [lifted(matrix @ Vector(p.co)) for p in cut.pp_points],
+            'world': world,
+            'drawn': [surface._lifted(model, inv_target, normal_matrix,
+                                      p, lift) for p in world],
         }
 
     def _surface_hit(self, context, mouse):
-        """World point on the model under the mouse, or None."""
+        """(world point, face) on the model under the mouse, or (None, -1)."""
         origin = view3d_utils.region_2d_to_origin_3d(
             self.region, self.rv3d, mouse)
         direction = view3d_utils.region_2d_to_vector_3d(
             self.region, self.rv3d, mouse)
         model = surface.evaluated(self.target)
         inv = model.matrix_world.inverted()
-        hit, location, _normal, _index = model.ray_cast(
+        hit, location, _normal, index = model.ray_cast(
             inv @ origin, inv.to_3x3() @ direction)
         if not hit:
-            return None
-        return model.matrix_world @ location
+            return None, -1
+        return model.matrix_world @ location, index
 
     def _nearest_point(self, mouse):
         """The point under the mouse, picked where it is actually drawn.
@@ -371,20 +360,20 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         return ((model.matrix_world @ location) - origin).length < reach - slack
 
     def _insert_point(self, context, mouse):
-        """Add a control point on the surface, inside the nearest segment."""
-        world = self._surface_hit(context, mouse)
+        """Add an anchor on the surface, inside the nearest span."""
+        world, face = self._surface_hit(context, mouse)
         if world is None:
             self.report({'WARNING'}, "Ctrl+Click on the model's surface")
             return
-        items = [(Vector(p.co), p.loop) for p in self.cut.pp_points]
+        items = [(Vector(p.co), p.loop, p.face) for p in self.cut.pp_points]
         if len(items) < 2:
             return
-        # The new point keeps the clicked position, so it lands on the
-        # model's surface just like a dragged point.
-        clicked = self.cut.matrix_world.inverted() @ world
+        # The new anchor keeps the clicked position, so it lands on the
+        # model's surface just like a dragged one.
+        clicked = self.target.matrix_world.inverted() @ world
 
         by_loop = {}
-        for index, (co, loop_id) in enumerate(items):
+        for index, (co, loop_id, _face) in enumerate(items):
             by_loop.setdefault(loop_id, []).append((index, co))
 
         after, best = None, float('inf')
@@ -404,24 +393,27 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         if after is None:
             return
 
-        items.insert(after + 1, (clicked, items[after][1]))
-        surface.store_control_points(self.cut, [c for c, _l in items],
-                                     [l for _c, l in items])
+        items.insert(after + 1, (clicked, items[after][1], face))
+        self._store(items)
         self.cut.pp_main_loop = items[after][1]
         self.moved = True
         self._rebuild_cache()
         self._rebuild_cap()
 
+    def _store(self, items):
+        surface.store_anchors(self.cut, [co for co, _l, _f in items],
+                              [l for _co, l, _f in items],
+                              [f for _co, _l, f in items])
+
     def _delete_point(self, index):
-        items = [(Vector(p.co), p.loop) for p in self.cut.pp_points]
+        items = [(Vector(p.co), p.loop, p.face) for p in self.cut.pp_points]
         loop_id = items[index][1]
-        if sum(1 for _c, l in items if l == loop_id) <= 3:
+        if sum(1 for _c, l, _f in items if l == loop_id) <= 3:
             self.report({'WARNING'},
                         "A cut line needs at least 3 points")
             return
         items.pop(index)
-        surface.store_control_points(self.cut, [c for c, _l in items],
-                                     [l for _c, l in items])
+        self._store(items)
         self.hover = -1
         self.moved = True
         self._rebuild_cache()
@@ -429,19 +421,18 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
 
     def _delete_loop(self, index):
         """Drop a whole cut line — the region it fences stops being cut."""
-        items = [(Vector(p.co), p.loop) for p in self.cut.pp_points]
+        items = [(Vector(p.co), p.loop, p.face) for p in self.cut.pp_points]
         if index < 0 or index >= len(items):
             self.report({'WARNING'}, "Hover a point on the line to remove it")
             return
         doomed = items[index][1]
-        kept = [(co, loop) for co, loop in items if loop != doomed]
+        kept = [item for item in items if item[1] != doomed]
         if not kept:
             self.report({'WARNING'}, "A cut needs at least one line")
             return
         order = {loop: i for i, loop
-                 in enumerate(sorted({loop for _co, loop in kept}))}
-        surface.store_control_points(self.cut, [co for co, _l in kept],
-                                     [order[l] for _co, l in kept])
+                 in enumerate(sorted({l for _co, l, _f in kept}))}
+        self._store([(co, order[l], f) for co, l, f in kept])
         # Loop ids shift down, so follow the main line across or forget it.
         self.cut.pp_main_loop = order.get(self.cut.pp_main_loop, -1)
         self.hover = -1
@@ -467,27 +458,18 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
             return {'PASS_THROUGH'}
 
         if event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}:
-            if not event.ctrl:
-                return {'PASS_THROUGH'}
-            step = 1.15 if event.type == 'WHEELUPMOUSE' else 1.0 / 1.15
-            self.cut.pp_falloff = max(0.2, min(12.0,
-                                               self.cut.pp_falloff * step))
-            self.moved = True
-            self._rebuild_cache()
-            self._rebuild_cap()
-            context.workspace.status_text_set(
-                f"Falloff {self.cut.pp_falloff:.2f}    " + STATUS)
-            return {'RUNNING_MODAL'}
+            return {'PASS_THROUGH'}
 
         if event.type == 'MOUSEMOVE':
             if self.dragging >= 0:
-                world = self._surface_hit(context, mouse)
+                world, face = self._surface_hit(context, mouse)
                 if world is not None:
-                    # The raw hit is used as-is: the point stays exactly on
-                    # the model's surface and the cut surface is re-fitted
-                    # to pass through it.
-                    self.cut.pp_points[self.dragging].co = (
-                        self.cut.matrix_world.inverted() @ world)
+                    # The raw hit is used as-is: the anchor stays exactly on
+                    # the model's surface, and only the two spans either side
+                    # of it are walked again.
+                    anchor = self.cut.pp_points[self.dragging]
+                    anchor.co = self.target.matrix_world.inverted() @ world
+                    anchor.face = face
                     self.moved = True
                     self._rebuild_cache()
                     self._rebuild_cap()
@@ -506,15 +488,10 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
                 return {'RUNNING_MODAL'}
             if event.value == 'RELEASE':
                 if self.dragging >= 0:
-                    # Keep the cut's plane aligned to the line as it moves,
-                    # so dragging it right round a limb still describes a
-                    # region that can be cut. The line being edited is the
-                    # one the plane should follow.
+                    # The line being edited is the one anything hanging off
+                    # the cut should follow.
                     self.cut.pp_main_loop = \
                         self.cut.pp_points[self.dragging].loop
-                    surface.refit_frame(self.cut)
-                    self._rebuild_cache()
-                    self._rebuild_cap()
                     self._inspect(context)
                 self.dragging = -1
                 return {'RUNNING_MODAL'}
@@ -542,7 +519,7 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
     def _confirm(self, context):
         self._finish(context)
         cut = self.cut
-        surface.refit_frame(cut)
+        surface.frame_to_line(cut, self.target)
         surface.build_display_mesh(cut, self.target)
         cut.hide_set(self.was_hidden)
 
@@ -556,7 +533,8 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         if snapped:
             message += f", {snapped} connector(s) snapped to it"
         self.report({'INFO'}, message)
-        problem = surface.cut_line_problem(cut) if cut.pp_local else None
+        problem = (surface.cut_line_problem(cut, self.target)
+                   if cut.pp_local else None)
         if problem:
             self.report({'ERROR'}, f"This cut cannot be made yet: {problem}")
         return {'FINISHED'}
@@ -569,10 +547,7 @@ class PARTPIN_OT_edit_cut_surface(bpy.types.Operator):
         for conn, world in connectors:
             conn.matrix_parent_inverse = self.snapshot_matrix.inverted()
             conn.matrix_world = world
-        surface.store_control_points(
-            self.cut, [co for co, _l in self.snapshot],
-            [l for _co, l in self.snapshot])
-        self.cut.pp_falloff = self.falloff_start
+        self._store(self.snapshot)
         surface.build_display_mesh(self.cut, self.target)
         self.cut.hide_set(self.was_hidden)
         self.report({'INFO'}, "Cut shape reverted")
@@ -645,7 +620,8 @@ class PARTPIN_OT_check_cut_line(bpy.types.Operator):
     def execute(self, context):
         cut = _surface_cut(context)
         target = core.get_settings(context).target
-        problem = surface.cut_line_problem(cut) if cut.pp_local else None
+        problem = (surface.cut_line_problem(cut, target)
+                   if cut.pp_local else None)
         if problem:
             self.report({'ERROR'}, f"Cut '{cut.name}': {problem}")
             return {'CANCELLED'}
@@ -694,7 +670,10 @@ class PARTPIN_OT_snap_connectors(bpy.types.Operator):
 class PARTPIN_OT_reset_cut_shape(bpy.types.Operator):
     bl_idname = "partpin.reset_cut_shape"
     bl_label = "Flatten Cut"
-    bl_description = "Reset the active surface cut back to a flat plane"
+    bl_description = (
+        "Lay the cut line back down where a flat cut would meet the model — "
+        "the flat plane closest to the line as it stands"
+    )
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -706,10 +685,18 @@ class PARTPIN_OT_reset_cut_shape(bpy.types.Operator):
     def execute(self, context):
         cut = context.view_layer.objects.active
         target = core.get_settings(context).target
-        for point in cut.pp_points:
-            point.co = (point.co[0], point.co[1], 0.0)
-        if target is not None:
-            surface.build_display_mesh(cut, target)
+        if target is None:
+            self.report({'ERROR'}, "Pick a model first")
+            return {'CANCELLED'}
+        # The line is on the model, so flattening it is not a matter of
+        # zeroing a height any more: it is asking where a flat cut through
+        # the plane the line lies closest to would meet the model.
+        if not surface.flatten_line(cut, target,
+                                    core.get_settings(context).handle_points):
+            self.report({'WARNING'},
+                        "A flat cut there does not meet the model")
+            return {'CANCELLED'}
+        surface.build_display_mesh(cut, target)
         self.report({'INFO'}, "Cut flattened")
         return {'FINISHED'}
 

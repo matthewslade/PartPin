@@ -118,11 +118,6 @@ class PARTPIN_PT_shape(PARTPIN_PT_base, bpy.types.Panel):
             else:
                 box.label(text="Untick if the cut will not separate",
                           icon='INFO')
-            sub = box.column()
-            sub.enabled = cut.pp_local
-            sub.prop(cut, "pp_undercut")
-            box.prop(cut, "pp_falloff")
-            box.prop(s, "surface_resolution")
             if cut.pp_local:
                 box.label(text="Marks show what would stop the cut",
                           icon='INFO')

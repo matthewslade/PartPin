@@ -1,272 +1,250 @@
-# Next job: store the cut line on the surface, not over a plane
+# The cut line lives on the surface — done, and what is left
 
-**Status:** the cutter is sound. The **line** is not. Everything fiddly about
-the tool traces back to one decision — a cut line is stored as a *height field
-over a fitted plane* — and no amount of patching the symptoms has fixed it. Nine
-releases (1.12 → 1.21) went on symptoms. This document says what to build
-instead.
+**Status:** built and measured. A cut line is no longer a height field over a
+fitted plane; it is a ring of anchors on the model with the path between
+consecutive anchors **walked across the surface**. Everything the old
+representation could not hold — the contour, the hairpins, the 45° limit, the
+knobs — went with it.
 
-Written by the agent who built the mesh-surgery cutter, at the user's request,
-for whoever does the rework. **Read §4 before writing code** — a lot of
-plausible fixes have already been measured and rejected, several of them twice.
+Written by the agent who did the rework, for whoever comes next. §5 is the
+measurements, §6 is what is still open, §7 is what has already been tried and
+rejected — **read §7 before writing code**, several of those were measured
+wrong twice.
 
 ---
 
-## 1. What is wrong, measured
+## 1. What it was, and what it measured
 
-A cut line is a handful of control points kept in the cut object's own local
+A cut line used to be a handful of control points in the cut object's own
 space, with a Wendland-RBF height field `h(u, v)` over that object's XY plane
-interpolating them (`surface.HeightField`, `surface.field_for`). The line you
-see and the line that cuts are both `surface.line_samples`: walk the control
-polygon **in the plane**, evaluate the field, then project each sample onto the
-model.
+interpolating them. The line you saw and the line that cut were both a walk of
+that field's control polygon *in the plane*, projected onto the model.
 
-That representation cannot hold a contour. On the user's model (a 441,616-face
-sculpt, 156.36 across, closed and manifold):
+On the user's model (a 441,616-face sculpt, 156.36 across):
 
 | file | control points | line strays from the polyline through its own points |
 | --- | --- | --- |
 | freshly drawn | 25 | **0.55 = 0.353% of the model** |
 | after a failed cut | 40 | **1.40 = 0.894% of the model** |
 
-The line passes through its control points exactly (measured: 0.0000) and every
-control point is on the surface (0.0000). Between them it sags toward the fitted
-plane, because that is what a height field does. In the user's words the lines
-"pulled away from their respective points which ruins the contour I was trying
-to follow". That is not a bug to patch; it is the representation declining to
-hold the shape.
+The line passed through its control points exactly and sagged towards the
+fitted plane between them, because that is what a height field does. A contour
+wrapping round a limb is not a function over any plane, so where the field
+could not express what was drawn, the projected line doubled back on itself —
+373 and 3,648 hairpin pairs on those two files, **on lines that had only just
+been drawn**. A hairpin is the one shape of perimeter that cannot be cut.
 
-**The hairpins come from the same place.** A contour wrapping round a limb is
-not a function over any plane, so where the field cannot express what was drawn,
-the projected line doubles back on itself. `mesh_cut.hairpins` finds them:
+## 2. What it is now
 
-| line | close pairs | facing alike (hairpin) | opposed (thin feature) |
-| --- | --- | --- | --- |
-| freshly drawn, will not cut | 380 | **373**, 1–23° | 0 |
-| after a failed cut | 4107 | **3648**, 1–7° | 0 |
-| collar across a 0.04 fin | 64 | 0 | 61, all 180° |
-| plain collar on a limb | 0 | 0 | 0 |
+**`part_pin/walker.py`** — the one piece of new machinery. Everything else in
+the rework is subtraction.
 
-A hairpin is the one shape of perimeter that cannot be cut: there is no room to
-cut between its two sides. It is present **on a freshly drawn line, before any
-cut is attempted**, which rules out the cutter as the cause.
+- **Anchors** are stored in the *model's* local space (`pp_points`, with the
+  face each one sits on as a hint for the walker), so the line rides with the
+  model. A cut saved by an older version is brought across on first read —
+  `surface.migrate`, keyed on `pp_anchor_space`.
+- **Spans**: between anchor *i* and *i+1*, the shortest path across the
+  surface. Cached per anchor pair, so dragging one anchor re-walks the two
+  spans either side of it and nothing else.
+- **The ring handed to the cutter** is the anchors with each span's walked
+  points spliced in — `surface.line_rings`, and `mesh_cut.line_rings` above it
+  is still the single seam between the line and the cutter.
 
-Everything else the user complains about is downstream of the plane:
+### How a span is walked
 
-- *Cut Detail*, *Points*, falloff, `refit_frame` — all exist to manage the
-  field, and all are knobs the user should never have seen.
-- "One cut has one plane. Lines facing more than about 45° away from the one you
-  last edited are skipped with a warning" — `surface.loop_quality`'s
-  `min_alignment`. Purely an artefact of the plane.
-- `refit_frame` silently rewrites the cut's frame *and* its stored points on
-  every cut attempt, which is why a failed cut leaves the line different from
-  how it was drawn.
+1. Both ends are put onto a triangle (`Surface.locate`).
+2. A corridor is found by a shortest-path search **over the edges the path
+   would cross**, not over the triangles' middles, kept inside an ellipse with
+   the anchors as its foci and leaning towards the far anchor (A*).
+3. The corridor is unfolded flat and the **funnel algorithm** draws the
+   straight line across it.
+4. What comes back is where that line crosses each edge — points exactly on
+   the surface, with every stretch between two of them inside one triangle.
+5. The whole thing is repeated with the path just found as the guide, until a
+   pass finds nothing shorter. Most spans settle on the second pass.
 
-## 2. What to build
+If a span cannot be walked, it says so (`surface.BROKEN_AT`, marked blue in the
+editor). It never falls back to a chord through space.
 
-**Store the line as what was drawn: an ordered ring of anchor points on the
-model's surface, with the path between consecutive anchors walked across the
-surface.** No plane, no field, no projection of anything through space.
+### Five things in there that do not fail loudly
 
-- **Anchors** in the model's local space (so the line rides with the model if it
-  is moved), one ring per cut line. Keep the face index each anchor sits on as a
-  starting hint for the walker.
-- **Spans**: between anchor *i* and *i+1*, the shortest path *across the
-  surface*. Cache the walked points per span; a drag only invalidates the two
-  spans either side of the anchor it moved.
-- **The ring handed to the cutter** is the anchors with each span's walked points
-  spliced in — which is exactly the shape `mesh_cut` already consumes.
+Every one of these was a bug that produced a plausible-looking line running
+somewhere else entirely. They are commented in place; this is the index.
 
-### Why this fixes it rather than patching it
+- **The funnel's signed area is the other way round from the obvious one**
+  (`_turn` vs `_area2`). Backwards, the funnel turns at every gate and the
+  "straightened" path comes out 2.5× the length of the line it was asked for.
+- **The unfolding's fold direction, and the gates' left/right, are read off
+  each triangle's own winding**, not off where the neighbouring corner landed.
+  A model that has been through a boolean carries triangles with no area, their
+  far corner lands *on* the shared edge, and "the other side from that" is a
+  coin toss.
+- **The funnel's ends are drawn a hair towards the middle of their triangle**
+  (`_in_flat`). An anchor sits exactly on one of the model's edges more often
+  than not — every point of a line round an extruded limb does — and an end of
+  the funnel sitting on a gate leaves it spanning half a turn.
+- **The corridor's cost includes the last leg to the far anchor.** Without it,
+  a corridor arriving through a gate at the far end of a long triangle looks
+  cheaper than one arriving beside the anchor.
+- **Two parallel segments have no single closest point**, so
+  `_closest_on_segment` takes the middle of the overlap. An end instead puts
+  the search's guess a whole edge away — and a line along a limb runs parallel
+  to every edge of it.
 
-- The line is on the surface everywhere by construction, so it cannot stray from
-  the contour and cannot sag.
-- **Hairpins become impossible between anchors**: a shortest path does not
-  double back. A hairpin can then only come from anchors the user has genuinely
-  dragged into one, which is visible, local, and their choice.
-- Dragging is local and predictable: no falloff, no field, no re-fitting.
-- Lines at any angle work. The 45° limitation goes.
+## 3. What went, and what replaced it
 
-### The walker
+| Gone | Replaced by |
+| --- | --- |
+| `HeightField`, `field_for`, `pp_falloff` | nothing — the line is on the model |
+| `refit_frame` (rewrote the stored points on every cut attempt) | `frame_to_line`, which moves only the cut object's own frame |
+| `loop_quality`'s plane and 45° alignment test | nothing; every line is cut |
+| `line_samples`' in-plane chord walk | `line_rings`, walked across the surface |
+| `cap_sheet`, `build_cap_slab`, `find_join_hints`, `CAP_STEP_OUT`, `SEAM_FACTOR` | `mesh_cut._cap_plan`, which is what the cutter actually fills rims with |
+| `surface_resolution` (*Cut Detail*), `pp_undercut` | nothing |
+| `build_surface_cutter`'s height grid | a half-space on the plane fitted to the finished ring |
+| `_height_grid`, `_full_grid_bm`, `frame_extent`, `_rim_rings`, `_segments_touch`, `polygon_roundness`, and five dead helpers in `core` | deleted |
 
-This is the one real piece of new machinery. Recommended shape:
+Two changes inside the cutter, both forced by the line being walked rather than
+sampled at a fixed count:
 
-1. Find the start and end faces (`closest_point_on_mesh` gives a face index).
-2. **Window** the search: only faces within an ellipse whose foci are the two
-   anchors, padded by ~1.5× their straight-line distance. Consecutive anchors
-   are ~0.2 apart on a 156-unit model, so this is a few hundred faces out of
-   441,616 — the windowing is what makes it interactive, and it must not be left
-   out.
-3. Dijkstra over the mesh vertices/edges inside the window to get a corridor.
-4. **Straighten** the corridor with the funnel algorithm over the triangle strip
-   it crosses. Without this the path zig-zags along mesh edges, which reintroduces
-   the crowded-and-coincident sample problem `_thinned`/`_filled` exist to clean
-   up. With it, the path is a proper geodesic within the strip.
-5. If the walk fails (the anchors are on disconnected shells, or the window is
-   exhausted), say so plainly on that span rather than falling back to a chord
-   through space. A chord through space is the bug being removed.
+- **`REPAIR_REACH` is a share of the line's length**, not a count of samples.
+  How many samples a line has is now a fact about the model's density, and
+  "five samples" covered a hand's breadth of one model and half of another.
+- **`hairpins` measures how far apart two stretches are *along the line***, not
+  in samples, and buckets by position instead of comparing every pair. In
+  samples it flagged **12,036 pairs on a clean line** on a dense model. It also
+  reads 30° rather than 60° as "facing alike": the root of a fin comes in at
+  about 40° on a cut that works, and the real hairpins came in at 1–23°.
 
-Straightest-geodesic marching (step within a face toward the target, cross the
-edge you hit, repeat) is tempting because it is ~30 lines. It gets stuck on
-concave regions and on a sculpt of this density it will get stuck often. If it
-is tried, hold it to the same bar in §5 and measure the failure rate before
-trusting it.
+`_thinned` and `_filled` are still there and still earn their place — the
+walker's crossings crowd where the path passes near a vertex.
 
-## 3. What stays
+## 4. The one thing added to the cutter
 
-**`part_pin/mesh_cut.py` is sound and measured. Do not rewrite it.** It takes a
-ring of world points on the surface and produces two closed parts, with the seam
-landing on the ring to 0.0001% of the model's size and volume conserved exactly.
-It has been beaten on for nine releases and the remaining problems in it are all
-about the *line* it is given.
+`_weld_rim`: rim vertices sitting exactly on top of one another are merged
+before the cap is planned. Cutting a line into the model's faces leaves the odd
+coincident pair — where the line runs along an edge the model already has, the
+solver produces the crossing it was asked for *and* keeps the vertex that was
+there. Those are zero-length edges in the rim, the triangles spanning them
+cannot be built, and the part comes out with a few holes in it.
 
-What it needs from the rework:
+**This also cleared the one failing scenario in the suite** (§7 of the old
+notes: "connectors on a reshaped cut leave one part with a few tiny holes at
+the sockets"). It was not the pin's boolean.
 
-- `mesh_cut.line_rings(cut, target)` is the single seam between line and cutter.
-  Reimplement it on the new representation; everything below it is unchanged.
-- It returns a `settle` callable, used to draw the middle of the cap down onto
-  "the cut's own surface". With no height field there is no such surface —
-  **fit a plane to the finished ring and settle onto that.** That is legitimate:
-  the cap is a spanning surface and wants to be flat-ish in the middle; fitting
-  a plane to the *result* does not constrain the line. `_cap_plan` also takes a
-  `normal` for its frame — the same fitted plane's normal.
-- `_thinned` and `_filled` can probably go once the walker produces evenly
-  spaced points, but **measure before deleting**: they fixed a real bug where
-  coincident samples made band quads with no area, which is a red mark that
-  never shifts at any band height.
+## 5. Measured
 
-## 4. Already tried, measured, and rejected. Do not repeat these.
+The suite: **362 checks, all passing, three runs identical**, 13 seconds.
 
-Everything in the old §4 of `NEXT-mesh-surgery-cutter.md` still applies. On top
-of it, from the nine releases since:
+```sh
+/Applications/Blender.app/Contents/MacOS/Blender --background \
+    --python-exit-code 1 --python tests/smoke_test.py
+```
+
+On a 441,800-face model 270 across (`tests/smoke_test.make_dense_mesh`):
+
+| | before | now |
+| --- | --- | --- |
+| line off the model's surface | up to 0.894% of it | **8.5e-6 = 0.000003%** |
+| hairpins on a freshly drawn line | 373 and 3,648 | **0** |
+| re-walking two spans after a drag | — | **4–12 ms** (bar: 100 ms) |
+| reading the model, once per model | — | 0.7 s |
+| building a whole line, 33 spans | — | 0.09 s |
+
+The line still leaves the polyline through its own anchors, and should: a
+geodesic bulges where the surface does. What matters is that it closes on them
+as the anchors get closer together — 0.031 → 0.008 → 0.003 for 8, 16 and 32
+anchors round the same collar, which is a chord closing on an arc. The suite
+asserts that.
+
+Against a sphere, where the answer is known exactly, the walked span is within
+**0.5% of the great circle** at 22.5°, 45° and 90° of arc, and its greatest
+distance from the chord equals the sagitta to four figures.
+
+## 6. What is still open
+
+- **The editor's preview is now the cutter's own cap plan**
+  (`surface.cap_geometry` → `mesh_cut._cap_plan`), and the cut object's display
+  mesh is that same lid — or a plain plane when "Cut Inside Line Only" is off,
+  which is what that mode does. That closes the old §7 item.
+- **`bpy.ops.mesh.intersect` still only sees a selection set on the mesh, in
+  object mode.** Assignments through `bmesh.from_edit_mesh` do not reach it.
+- **Anything walking bmesh elements must walk in coordinate order.** bmesh
+  hashes by address; dict order varies between runs. This has bitten twice.
+- The walker's `WINDOWS` ladder gives up after the widest search. No fixture
+  reaches it, so the failure path is exercised only by the two-shells test.
+- `line_quality`'s spacing spread reads alarmingly (the raw ring has pairs a
+  hair apart where the path passes a vertex); the ring the cutter is handed,
+  reported on the next line of `diagnose_cut`, is evenly spaced. Worth tidying
+  if it ever misleads a diagnosis.
+
+## 7. Already tried, measured, and rejected. Do not repeat these.
+
+Everything in §4 of `NEXT-mesh-surgery-cutter.md` still applies. On top of it:
 
 | Attempt | Outcome |
 | --- | --- |
-| Tuning the band's height — fixed, spacing-derived, measured surface bulge, room to the next surface, crease-following resampling, and combinations | Every one failed on at least one fixture. The cutter now tries a ladder and **verifies**; keep that shape |
+| Tuning the band's height — fixed, spacing-derived, measured surface bulge, room to the next surface, crease-following resampling, and combinations | Every one failed on at least one fixture. The cutter tries a ladder and **verifies**; keep that shape |
 | Capping the band's height by the line's turning radius | Regressed `make_limb_with_fin`, which needs a band taller than the fin's edges are round |
 | Capping it by how close the line comes back to itself | Same regression, and did not close the gap it was written for |
-| Repairing a failed seam by raising the band locally around the loose ends | Helps a cube's corners and an armpit (8× too thin still cuts). **Makes a hairpin dramatically worse** — 6 spots became 10, 20, 148, 926 — because raising the band is what does the damage there |
-| Flagging hairpins by proximity alone | Fires on a collar across a thin fin, where the two sides are legitimately that close. Marks on a working cut are the one thing that must never ship |
-| Cutting doubled-back stretches out automatically | Not safe as written: the excursion can be the part the user wanted. Kept as a marker only |
+| Repairing a failed seam by raising the band locally around the loose ends | Kept, but it is what makes a hairpin dramatically worse (6 spots became 10, 20, 148, 926) |
+| Flagging hairpins by proximity alone | Fires on a collar across a thin fin, where the two sides are legitimately that close |
+| Cutting doubled-back stretches out automatically | Not safe: the excursion can be the part the user wanted. Marker only |
 | Capping both halves from separate triangulations | Two triangulations of a non-planar loop span different surfaces: parts stop mating and 2% of the model goes missing. **One shared triangulation, always** |
 | Requiring parts to come out perfectly manifold | A model with one nick in it can never pass. Judge on leaving it **no worse than it arrived** |
+| Searching the corridor over the triangles' middles (the textbook way) | Comes apart on a real model: the side of an extruded limb is one triangle six units long. Search over the edges the path would cross |
+| Plain Dijkstra for the corridor | Correct but 11× slower than the same search leaned towards the far anchor. A drag went from 175 ms to 16 ms |
+| Fitting the cap's plane to the rim by least squares | Leans over towards an excursion in the line, and seen down *that* the loop can cross itself. Use the area-weighted normal |
 
-Two bugs that will bite again if the code is rewritten carelessly:
+## 8. Setting up, and the tools
 
-- `bpy.ops.mesh.intersect` only sees a selection set **on the mesh, in object
-  mode**. Assignments through `bmesh.from_edit_mesh` do not reach it.
-- Anything walking bmesh elements must walk in **coordinate order**. bmesh
-  hashes by address, so dict order varies between runs and the same cut then
-  works one run and not the next. This has bitten twice, in two different
-  places.
+There is **Blender 5.2 on the dev machine now**, which is the quickest way to
+run anything:
 
-## 5. The bar
+```sh
+/Applications/Blender.app/Contents/MacOS/Blender --background \
+    --python-exit-code 1 --python tests/smoke_test.py
+```
 
-Existing scenarios must all still pass (`tests/smoke_test.py`, currently 1
-known failure — see §7). On top of them:
-
-1. **The line is on the surface.** Every sample within 1e-4 of the model, on
-   every fixture. Currently 0.0000 at the anchors and up to 0.894% between them.
-2. **The line holds its contour.** Max deviation from the polyline through its
-   own anchors under ~0.05% of the model on the user's files, against 0.353% and
-   0.894% now. (It will not be zero — a geodesic bulges where the surface does,
-   which is correct.)
-3. **No hairpins from drawing.** `mesh_cut.hairpins` returns empty on both of
-   the user's saved files. Currently 373 and 3648 pairs.
-4. **All eight geometry fixtures still cut** into closed parts with volume
-   conserved: limb, limb+fin, shoulder, shoulder-arm (armpit), cube waist at 13
-   /16/24 points, mushroom. Plus the sphere cases in the suite.
-5. **The seam still lands on the line** to 0.2% of the model, which
-   `scenario_seam_lands_on_the_line` already asserts (it measures 0.0001%).
-6. **Dragging stays interactive.** Re-walking two spans on the 441,616-face
-   sculpt under ~100 ms. Measure it; this is what the windowing in §2 is for.
-7. **No plane-alignment warning exists any more**, and no cut is ever skipped
-   for facing the wrong way.
-8. **Silent when it works.** Zero marks of any colour on a cut that cuts. This
-   has destroyed the user's trust in the marks twice; the suite asserts it.
-
-Run the suite **three times** — a bmesh-ordering bug has twice made results
-vary between runs.
-
-## 6. Setting up, and the tools
-
-There is **no Blender on the dev machine**; the tests run against the `bpy`
-PyPI wheel, and a fresh workspace has no venv:
+The `bpy` PyPI wheel also works and needs CPython 3.13 (`brew install
+python@3.13`), which a fresh workspace will not have:
 
 ```sh
 /opt/homebrew/bin/python3.13 -m venv .venv-bpy && .venv-bpy/bin/pip install bpy
 .venv-bpy/bin/python tests/smoke_test.py
 ```
 
-`import bpy` must come **before** `import bmesh`. The wheel needs CPython 3.13.
+`import bpy` must come **before** `import bmesh`.
 
-**`tools/diagnose_cut.py` is the most valuable thing in the repo for this
-work.** It opens a saved .blend, reports the model and the line, then walks
-every band the cutter would try and says which of the three failures it ended
-on and where. Every real diagnosis in this session came from it; every diagnosis
-made without it was wrong.
+**`tools/diagnose_cut.py` is still the most valuable thing in the repo for
+this work.** It opens a saved .blend, reports the model, the line's quality —
+how far off the surface, how far from its own anchors, the spacing spread, the
+hairpin count — and then walks every band the cutter would try.
 
 ```sh
-.venv-bpy/bin/python tools/diagnose_cut.py <file.blend>
+blender --background --python tools/diagnose_cut.py -- <file.blend> [cut name]
 ```
 
-Ask the user to re-attach their saved files — they live in `.context/`, which is
-per-workspace and gitignored, so a new workspace will not have them. The three
-that matter: a cut that works, a freshly drawn cut full of hairpins, and a cut
-after a failed attempt. **Add a "line quality" section to the tool** as part of
-this work: on-surface deviation, deviation from the anchor polyline, spacing
-spread, and hairpin count. Those four numbers are the whole bar in §5.
-
-## 7. Known problems, unrelated to the line
-
-- **Connectors on a reshaped cut leave one part with a few tiny holes at the
-  sockets** — three edges per pin beyond the first, reproduced on a clean
-  441,616-face model. The seam is sound before the pin goes in; it is the pin's
-  boolean. Ruled out: cap ring count, step, settle strength, ear-selection, and
-  `use_hole_tolerant`. It happens with *any* interior cap geometry at all. This
-  is the one failing scenario in the suite. The untried idea is reordering —
-  union the pins into the model and cut afterwards, rather than cutting first.
-- **The editor still previews the old synthesised lid** (`shape_edit._rebuild_cap`
-  → `surface.cap_preview_tris` → `cap_sheet`), which is not what the cutter
-  does. It should show the cap the cutter actually builds
-  (`mesh_cut._cap_plan`). Blocks deleting `cap_sheet`, `build_cap_slab`,
-  `find_join_hints`, `CAP_STEP_OUT`, `SEAM_FACTOR`, and the `pp_undercut`
-  setting, which does nothing to this cutter.
-- **The full-extent cutter** (`pp_local = False`, `build_surface_cutter`) is
-  built on the height field. It is the "untick Cut Inside Line Only" fallback
-  and it works. Removing the field breaks it, so give it a plane fitted to the
-  ring — which is all it ever really was.
-
-## 8. What to delete once the walker works
-
-`HeightField`, `field_for`, `refit_frame`, `loop_quality`'s plane and alignment
-checks, `line_samples`' in-plane chord walk, `pp_falloff`, `surface_resolution`
-(*Cut Detail*) if nothing else needs it, `frame_extent`/`_height_grid`/
-`_full_grid_bm` if the full-extent cutter stops needing them, and
-`convert_to_surface`'s plane fitting.
-
-**Dead code is what let the last crash through** — a helper renamed inside code
-nothing exercised. `surface.py` was 1984 lines with 687 unreachable. Delete
-aggressively and re-run the suite to prove it. Keep the two guards that have
-caught real bugs: the operator wiring audit, and "every setting the panel shows
-is used somewhere".
+Ask the user to re-attach their saved files — they live in `.context/`, which
+is per-workspace and gitignored, so a new workspace will not have them. The
+three that matter: a cut that works, a freshly drawn cut full of hairpins, and
+a cut after a failed attempt. **The two hairpin files are the ones this rework
+has never been run against**, because they were not in this workspace: every
+number in §5 is from fixtures, not from them.
 
 ## 9. Working with this user
 
 - **Ask for the .blend.** Three files settled three bugs in one run each, after
-  I had spent whole releases guessing wrong from descriptions. Never diagnose
-  from a description when a file is available.
-- **They read the tool better than the instrumentation does.** "It worked when I
-  retried" found a first-run/second-run context bug I had not looked for.
-  "Hairpins come from stop-start drawing" was correct about the mechanism and
-  pointed straight at `draw_cut.bridge_points`. Take their reading seriously and
-  reproduce it before theorising.
-- **Say plainly what is not fixed.** Several releases here claimed a probable
-  fix for something unreproduced; that was right to ship but only because the
-  notes said so. Never let a release imply more than was measured.
-- **Ship every change.** They install from the Releases page to try it; work
-  sitting unreleased is work they cannot use. Bump both
-  `part_pin/blender_manifest.toml` and `part_pin/__init__.py`, `./build.sh`,
-  push, `gh release create` with `--notes-file` (never `--notes`: backticks get
-  executed by the shell). A known failing test does not block a release, but
-  say so in the notes. **Never mention any other product in anything public.**
+  whole releases of guessing wrong from descriptions. Never diagnose from a
+  description when a file is available.
+- **They read the tool better than the instrumentation does.** "It worked when
+  I retried" found a first-run/second-run context bug. "Hairpins come from
+  stop-start drawing" was correct about the mechanism and pointed straight at
+  `draw_cut.bridge_points`.
+- **Say plainly what is not fixed.** Never let a release imply more than was
+  measured.
+- **Ship every change.** They install from the Releases page to try it. Bump
+  both `part_pin/blender_manifest.toml` and `part_pin/__init__.py`,
+  `./build.sh`, push, `gh release create` with `--notes-file` (never `--notes`:
+  backticks get executed by the shell). **Never mention any other product in
+  anything public.**
