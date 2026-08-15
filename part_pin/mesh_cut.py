@@ -28,6 +28,8 @@ through to two closed parts. The height is therefore only ever a question of
 how many tries it takes, never of whether the answer is right.
 """
 
+import math
+
 import bmesh
 import bpy
 from mathutils import Vector
@@ -398,6 +400,55 @@ def _regions(bm, layer, seam):
     return sizes
 
 
+# The least a band may be cut back to where it would otherwise fold, as a
+# share of the height that was asked for. Only a line doubling back on itself
+# gets anywhere near this, and that is marked in pink for what it is.
+FOLD_FLOOR = 0.05
+
+
+def _unfolded(rings, heights):
+    """The same band, cut back wherever it would fold over itself.
+
+    The band is a ribbon standing along the line, and where the line turns a
+    corner the rail on the inside of the turn runs back over itself: it
+    overlaps by the band's height times the tangent of half the turn. Where
+    that comes to more than the space between two samples, the ribbon is
+    self-intersecting — and no solver can say what a surface that crosses
+    itself cuts, so the seam simply breaks there, at every height on the
+    ladder, and taller bands make it worse rather than better.
+
+    So the height is cut back at those corners and left alone everywhere else.
+    On the line this was found on — a drawn line with one 62° corner in it —
+    38 samples of 437 were cut back, none below a seventh of the height asked
+    for, and a seam that came apart at every rung closed at the first.
+
+    This is not the same as capping the band by the line's turning radius,
+    which was tried and rejected: that shortens the whole band and leaves it
+    unable to bridge a crease elsewhere. Where the line runs straight, half a
+    turn of nothing is nothing, and the cap here is thousands of times the
+    height ever asked for.
+    """
+    cut_back = []
+    for ring, tall in zip(rings, heights):
+        count = len(ring)
+        along = []
+        for i, height in enumerate(tall):
+            before = ring[i] - ring[i - 1]
+            after = ring[(i + 1) % count] - ring[i]
+            if before.length < 1e-12 or after.length < 1e-12:
+                along.append(height)
+                continue
+            turn = before.angle(after, 0.0)
+            lean = math.tan(min(turn, 3.1) / 2.0)
+            if lean <= 1e-9:
+                along.append(height)
+                continue
+            room = min(before.length, after.length) / lean
+            along.append(max(min(height, room), height * FOLD_FLOOR))
+        cut_back.append(along)
+    return cut_back
+
+
 def _cut_surface(obj, rings, normals, heights, scene):
     """Cut the object's faces along the lines.
 
@@ -407,7 +458,7 @@ def _cut_surface(obj, rings, normals, heights, scene):
     loose ends are where it did not, in world space, which is exactly where
     the line needs moving.
     """
-    work = _work_object(obj, rings, normals, heights, scene)
+    work = _work_object(obj, rings, normals, _unfolded(rings, heights), scene)
     view_layer = bpy.context.view_layer
 
     # Whatever was active has to be in object mode before anything else is

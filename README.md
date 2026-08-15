@@ -37,11 +37,16 @@ Parts → Export.**
 ## 1. Pick the model
 
 Set **Model** in the panel. **Check Mesh** confirms it is closed and manifold.
-A stray edge or two in a dense sculpt is cut through anyway, with a warning —
-the parts carry the same flaw out the other side, and a plain hole is usually
-closed along with the seam. A properly open or broken mesh is refused, and
-wants repairing first (Mesh ▸ Clean Up, Remesh, or the 3D-Print Toolbox add-on
-that ships with Blender).
+
+If it is not, Check Mesh says how bad it is and drops you into Edit Mode with
+the bad edges **already selected**, ready for whichever repair you prefer —
+Mesh ▸ Clean Up, or the 3D-Print Toolbox add-on that ships with Blender. It
+changes nothing itself.
+
+You often do not need to repair anything. A stray edge or two in a dense sculpt
+is cut straight through: the flaw goes out into whichever part it falls in, and
+a plain hole is usually closed along with the seam. A properly open mesh — a
+sheet with no inside — is refused, because there is no solid there to split.
 
 ## 2. Draw the cut on the model
 
@@ -212,7 +217,7 @@ The whole geometry side runs headless — no UI needed:
 blender --background --python-exit-code 1 --python tests/smoke_test.py
 ```
 
-367 checks over sixty-odd scenarios: the line and how it is walked across the
+384 checks over sixty-odd scenarios: the line and how it is walked across the
 model, cutting along it on models from a cube to 441,800 faces, connectors,
 drawing, the warnings and all three exporters — every one of them checking that
 the parts come out closed and manifold and still add up to the model. On macOS

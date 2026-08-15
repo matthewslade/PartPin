@@ -112,6 +112,26 @@ def _cut_location(target, cursor):
 # Setup / validation
 # ----------------------------------------------------------------------
 
+def _show_mesh_problems(context, target):
+    """Put the model in Edit Mode with only its bad edges selected.
+
+    Nothing is changed — this is the model handed over to whichever repair
+    tool the user prefers, with the damage already picked out. Returns whether
+    it worked: from the sidebar it does, and from a script with no window it
+    does not, which is not worth failing over.
+    """
+    try:
+        _ensure_object_mode(context)
+        _select_only(context, [target])
+        bpy.ops.object.mode_set(mode='EDIT')
+        context.tool_settings.mesh_select_mode = (False, True, False)
+        bpy.ops.mesh.select_all(action='DESELECT')
+        bpy.ops.mesh.select_non_manifold()
+    except RuntimeError:
+        return False
+    return True
+
+
 class PARTPIN_OT_check_mesh(bpy.types.Operator):
     bl_idname = "partpin.check_mesh"
     bl_label = "Check Mesh"
@@ -126,14 +146,30 @@ class PARTPIN_OT_check_mesh(bpy.types.Operator):
         target = core.get_settings(context).target
         non_manifold, boundary = core.mesh_issues(target)
         if non_manifold == 0 and boundary == 0:
-            self.report({'INFO'}, f"'{target.name}' is closed and manifold — ready to cut")
-        else:
-            self.report(
-                {'WARNING'},
-                f"'{target.name}' has {non_manifold} non-manifold and "
-                f"{boundary} boundary edges — repair before cutting "
-                "(Mesh > Clean Up, Remesh, or the 3D-Print Toolbox add-on)",
-            )
+            self.report({'INFO'},
+                        f"'{target.name}' is closed and manifold — ready to cut")
+            return {'FINISHED'}
+
+        # A cut goes through this much damage perfectly well and carries it
+        # out into whichever part it falls in, so the useful thing is not to
+        # refuse but to say how bad it is and put the model in front of the
+        # user with the bad edges selected — every repair tool Blender has
+        # works on a selection.
+        edges = max(len(target.data.edges), 1)
+        share = (non_manifold + boundary) / edges
+        showing = _show_mesh_problems(context, target)
+        how = ("a few stray edges in a big mesh — cuts go through this"
+               if share < 5e-4 else
+               "enough to be worth repairing before cutting")
+        self.report(
+            {'WARNING'},
+            f"'{target.name}' has {non_manifold} non-manifold and "
+            f"{boundary} open edge(s) of {edges} — {how}. "
+            + ("They are selected in Edit Mode: Mesh ▸ Clean Up, or the "
+               "3D-Print Toolbox add-on that ships with Blender"
+               if showing else
+               "Find them with Select ▸ All by Trait ▸ Non Manifold"),
+        )
         return {'FINISHED'}
 
 

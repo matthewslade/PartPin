@@ -259,6 +259,58 @@ def scenario_validation(core):
     check("open mesh rejected with error", raised)
 
 
+def scenario_check_mesh_shows_the_damage(core):
+    """Check Mesh has to do more than count: a model with a flaw in it wants
+    the flaw found, and every repair tool Blender has works on a selection."""
+    print("Scenario: Check Mesh finds the damage and changes nothing")
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_sphere()
+    s.target = model
+    check("a sound model checks out", bpy.ops.partpin.check_mesh()
+          == {'FINISHED'})
+    check("and is left in object mode", model.mode == 'OBJECT')
+
+    # A real flaw: one face taken out of an otherwise closed model.
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    bm = bmesh.new()
+    bm.from_mesh(model.data)
+    far = max(bm.faces, key=lambda f: f.calc_center_median().x)
+    bmesh.ops.delete(bm, geom=[far], context='FACES_ONLY')
+    bm.to_mesh(model.data)
+    bm.free()
+    model.data.update()
+    s.target = model
+    bpy.context.view_layer.update()
+    was = (core.mesh_issues(model), len(model.data.vertices),
+           len(model.data.polygons))
+
+    bpy.ops.partpin.check_mesh()
+    check("a flawed model is put in front of you to fix",
+          model.mode == 'EDIT', f"mode {model.mode}")
+    if model.mode == 'EDIT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+    chosen = sum(1 for e in model.data.edges if e.select)
+    check("with the damage picked out and nothing else", chosen == was[0][0],
+          f"{chosen} edges selected, {was[0][0]} non-manifold")
+    check("and nothing about the model changed",
+          (core.mesh_issues(model), len(model.data.vertices),
+           len(model.data.polygons)) == was,
+          str(was))
+
+    # And the cut goes through it regardless — that is the point of tolerating
+    # a flaw rather than refusing the model.
+    from part_pin import surface
+    cut = collar_cut(core, surface, model)
+    failures = []
+    parts, _applied, _warns = core.create_parts(
+        bpy.context, model, [cut], keep_original=True, failures=failures)
+    check("a model with a flaw in it still cuts", len(parts) == 2,
+          f"got {len(parts)}: {failures}")
+
+
 def scenario_export(core):
     print("Scenario: export STL / OBJ / FBX")
     s = scenario_easy_mode(core)  # fresh scene with two finished parts
@@ -2334,6 +2386,75 @@ def scenario_a_seam_repairs_itself(core):
         mend("armpit crease", model, cut)
 
 
+def scenario_a_corner_in_the_line_still_cuts(core):
+    """A sharp corner in the line must not stop the cut.
+
+    The band is a ribbon standing along the line, and at a corner the rail on
+    the inside of the turn runs back over itself. A ribbon that crosses itself
+    is not something any solver can cut with, so the seam came apart there at
+    every height on the ladder — and taller bands made it worse. Found on a
+    409,717-face model with one 62° corner in a drawn line: four loose ends at
+    the first rung, 342 at the last, and nothing in twenty tries.
+    """
+    print("Scenario: a sharp corner in the line still cuts")
+    reset_scene()
+    from part_pin import mesh_cut, surface
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    before = volume(model)
+
+    # A collar with one anchor pulled well along the limb, which is what
+    # dragging a point into a corner does.
+    anchors = collar_points(surface, model, count=16)
+    inverse = model.matrix_world.inverted()
+    anchors[4] = inverse @ surface.project_to_surface(
+        model, model.matrix_world @ anchors[4] + Vector((0.55, 0.0, 0.0)))
+    bpy.ops.partpin.add_plane_cut()
+    cut = bpy.context.view_layer.objects.active
+    cut, _error = surface.convert_to_surface(bpy.context, cut, model,
+                                             per_loop=16)
+    surface.store_anchors(cut, anchors, [0] * len(anchors))
+
+    rings, _normals = mesh_cut.line_rings(cut, model)
+    turns = []
+    for ring in rings:
+        count = len(ring)
+        for i in range(count):
+            before_step = ring[i] - ring[i - 1]
+            after = ring[(i + 1) % count] - ring[i]
+            if before_step.length > 1e-9 and after.length > 1e-9:
+                turns.append(math.degrees(before_step.angle(after, 0.0)))
+    check("the line really does turn a corner", max(turns) > 40.0,
+          f"sharpest turn {max(turns):.0f}°")
+
+    asked = core.bbox_diagonal(model) * mesh_cut.BAND_LADDER[0]
+    heights = mesh_cut._uniform(rings, asked)
+    kept = mesh_cut._unfolded(rings, heights)
+    shortened = [h for ring in kept for h in ring if h < asked * 0.999]
+    check("the band is cut back where it would fold", shortened,
+          f"{len(shortened)} of {sum(len(r) for r in kept)} samples")
+    check("but only there — most of the line is left alone",
+          len(shortened) < sum(len(r) for r in kept) * 0.35,
+          f"{len(shortened)} of {sum(len(r) for r in kept)}")
+    check("and it is never cut back to nothing",
+          all(h >= asked * mesh_cut.FOLD_FLOOR for ring in kept for h in ring),
+          f"shortest {min(h for ring in kept for h in ring):.6f} of {asked:.6f}")
+
+    failures = []
+    parts, _applied, _warns = core.create_parts(
+        bpy.context, model, [cut], keep_original=True, failures=failures)
+    check("the cut goes through the corner", len(parts) == 2,
+          f"got {len(parts)}: {failures}")
+    if len(parts) != 2:
+        return
+    for p in parts:
+        check(f"part closed: {p.name}", is_closed(core, p))
+    check("and the model is all still there",
+          abs(sum(volume(p) for p in parts) - before) < before * 1e-6,
+          f"{sum(volume(p) for p in parts):.4f} vs {before:.4f}")
+
+
 def scenario_a_failed_cut_stays_put(core):
     """A cut that fails has to still be there, with the trouble marked.
 
@@ -2984,6 +3105,7 @@ def main():
     scenario_custom_connector(core)
     scenario_flip_pin(core)
     scenario_validation(core)
+    scenario_check_mesh_shows_the_damage(core)
     scenario_the_walker(core)
     scenario_the_line_holds_its_contour(core)
     scenario_dragging_stays_local(core)
@@ -3020,6 +3142,7 @@ def main():
     scenario_parts_can_be_cut_again(core)
     scenario_a_nicked_model_still_cuts(core)
     scenario_a_seam_repairs_itself(core)
+    scenario_a_corner_in_the_line_still_cuts(core)
     scenario_a_failed_cut_stays_put(core)
     scenario_line_hugs_surface(core)
     scenario_cap_preview(core)

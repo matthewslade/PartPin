@@ -65,11 +65,27 @@ Each one looks obviously right and costs a release to disprove.
 | Holding the cap's steps to exact areas, or hairpins to a count of samples | Both are fine on a coarse model and nonsense on a dense one, where the line carries a point per face. Measure against the model or against the line, never against a count of samples |
 | Requiring parts to come out perfectly manifold | A model with one nick in it could then never be cut. Judge on leaving it **no worse than it arrived** |
 | Tuning one band height to suit every model | Every value failed some fixture. The cutter tries a ladder and **verifies** each rung by carrying it through to two closed parts. Keep that shape |
-| Capping the band's height by the line's turning radius, or by how close the line comes back to itself | Both regress `make_limb_with_fin`, which needs a band taller than the fin's edges are round |
+| Capping the band's height *everywhere* by the line's turning radius, or by how close the line comes back to itself | Both regress `make_limb_with_fin`, which needs a band taller than the fin's edges are round. Cutting it back only at the corners where the ribbon would fold is a different thing and is what `_unfolded` does |
 | Flagging hairpins by proximity alone | Fires on a line across a thin fin, where the two sides are legitimately that close. Marks on a cut that works are the one thing that must never ship |
 | Cutting doubled-back stretches out automatically | Not safe: the excursion can be the part the user wanted. Marker only |
 | Fitting the cap's plane to the rim by least squares | Leans over towards an excursion in the line, and seen down *that* the loop can cross itself. Use the area-weighted (Newell) normal |
 | Nudging the band's line further than a millionth of the model to clear the mesh's own edges | Closes a regular tube and breaks a real sculpt. See the open item below |
+| Blaming a failed cut on the model when it reports non-manifold edges | Measured on a 409,717-face model with 3 bad edges: they were 1.7 units from the line and had nothing to do with it. The seam was breaking at a 62° corner the user had drawn. **Find where the loose ends are before believing any theory about why** |
+
+## The band must never fold over itself
+
+The band is a ribbon standing along the line. Where the line turns a corner,
+the rail on the inside of the turn runs back over itself — it overlaps by the
+height times the tangent of half the turn — and a ribbon that crosses itself is
+not something any solver can cut with. The seam breaks there at every rung of
+the ladder, and taller bands make it worse rather than better, which reads
+exactly like a crease the band cannot bridge and is the opposite problem.
+
+`_unfolded` cuts the height back at those corners and leaves the rest alone.
+That is not the same as capping the band by the line's turning radius, which
+*was* tried and rejected: that shortens the whole band and leaves it unable to
+bridge a crease elsewhere. Where the line runs straight the cap is thousands of
+times any height ever asked for.
 
 ## Two bugs that will bite again if this is rewritten carelessly
 
@@ -115,7 +131,7 @@ Bulk array work through `foreach_get`/`foreach_set` is the fix in every case.
     --python-exit-code 1 --python tests/smoke_test.py
 ```
 
-370 checks. **Run it three times** — a bmesh-ordering bug has twice made
+384 checks. **Run it three times** — a bmesh-ordering bug has twice made
 results vary between runs. It takes about 25 seconds; the dense fixtures are
 built from numpy arrays straight into the mesh, because asking bmesh for a
 441,800-face sphere takes over a minute on its own.
