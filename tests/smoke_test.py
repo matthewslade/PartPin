@@ -2936,6 +2936,32 @@ def scenario_a_cut_says_how_far_along_it_is(core):
     check("and so is the cut", cut.name in bpy.context.scene.objects)
 
 
+def scenario_the_version_is_shown_and_agrees(core):
+    """The version is on screen, and it is the one on the release.
+
+    It lives in two files — the manifest Blender installs from, and `bl_info`
+    — and a release where those disagree is one where a bug report cannot be
+    tied to a build.
+    """
+    print("Scenario: the version is shown, and says the same everywhere")
+    import re
+    from part_pin import ui
+
+    shown = ui.version()
+    check("the panel has a version to show", re.fullmatch(r"\d+\.\d+\.\d+",
+                                                          shown), shown)
+    manifest = os.path.join(REPO, "part_pin", "blender_manifest.toml")
+    with open(manifest) as handle:
+        written = re.search(r'^version = "(.+)"', handle.read(),
+                            re.MULTILINE).group(1)
+    check("and it is the version Blender installs", shown == written,
+          f"panel says {shown}, manifest says {written}")
+    check("it is drawn at the bottom, under everything else",
+          ui.CLASSES[-1] is ui.PARTPIN_PT_version
+          and ui.PARTPIN_PT_version.bl_parent_id == "PARTPIN_PT_main",
+          str([c.__name__ for c in ui.CLASSES]))
+
+
 def scenario_operators_registered(core):
     print("Scenario: new operators registered")
     reset_scene()
@@ -3004,6 +3030,7 @@ def main():
     scenario_modal_helpers(core)
     scenario_a_dense_model_cuts(core)
     scenario_a_cut_says_how_far_along_it_is(core)
+    scenario_the_version_is_shown_and_agrees(core)
     scenario_operators_registered(core)
     scenario_export(core)  # runs easy mode internally, then exports
 

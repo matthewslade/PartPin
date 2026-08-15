@@ -11,6 +11,12 @@ class PARTPIN_PT_base:
     bl_category = "PartPin"
 
 
+def version():
+    """The add-on's version, as it is written on the release."""
+    from . import bl_info
+    return ".".join(str(part) for part in bl_info["version"])
+
+
 class PARTPIN_PT_main(PARTPIN_PT_base, bpy.types.Panel):
     bl_idname = "PARTPIN_PT_main"
     bl_label = "PartPin"
@@ -213,6 +219,26 @@ class PARTPIN_PT_export(PARTPIN_PT_base, bpy.types.Panel):
         layout.operator("partpin.export_parts", icon='EXPORT')
 
 
+class PARTPIN_PT_version(PARTPIN_PT_base, bpy.types.Panel):
+    """The version, at the bottom of the panel and nowhere else.
+
+    No header, so it reads as a footer rather than as another thing to open,
+    and registered last so it stays at the bottom. Worth having on screen:
+    the first thing to establish about a bug is which version it is in, and
+    Blender's own add-on list is three clicks away.
+    """
+
+    bl_idname = "PARTPIN_PT_version"
+    bl_parent_id = "PARTPIN_PT_main"
+    bl_label = "Version"
+    bl_options = {'HIDE_HEADER'}
+
+    def draw(self, context):
+        row = self.layout.row()
+        row.alignment = 'RIGHT'
+        row.label(text=f"PartPin {version()}")
+
+
 CLASSES = (
     PARTPIN_PT_main,
     PARTPIN_PT_cuts,
@@ -220,6 +246,7 @@ CLASSES = (
     PARTPIN_PT_connectors,
     PARTPIN_PT_finalize,
     PARTPIN_PT_export,
+    PARTPIN_PT_version,
 )
 
 

@@ -8,6 +8,11 @@ export ready for slicing.
 Works in **Blender 4.2+** on Windows, macOS and Linux. Needs a **closed,
 manifold mesh** (as does every boolean-based cutter).
 
+![A 441,616-face sculpt cut into printable parts](docs/images/parts-laid-out.jpg)
+
+*A 441,616-face sculpt, cut into parts along lines drawn on it. Each cut takes
+about three seconds.*
+
 ## Install
 
 1. Download `part_pin-<version>.zip` from the
@@ -79,6 +84,14 @@ the cutting** drawn through the model.
 | Enter | Confirm |
 | Esc | Revert |
 
+![The cut line on the surface, with its draggable points and the shaded cap](docs/images/edit-line-on-surface.jpg)
+
+*The orange line is where the cut will meet the model — on the surface, all the
+way round. The white dots are the points you drag; the shaded patch is the lid
+the cutter will actually build. Between your points the line is walked across
+the model's own faces, taking the shortest way there is, so it holds the
+contour you drew instead of cutting across it.*
+
 Middle-mouse and the wheel still orbit and zoom, so you can spin the model
 around while editing.
 
@@ -122,6 +135,16 @@ objects: move, rotate, scale, duplicate (Shift+D) or delete them.
   the first time you add connectors.
 - **Snap Connectors** re-seats pins after you reshape a cut.
 
+![A pin standing proud of the cut face on the severed arm](docs/images/pin-on-the-cut-face.jpg)
+
+*The pin is unioned into one part…*
+
+![The matching sockets in the flat cut face on the body](docs/images/sockets-on-the-cut-face.jpg)
+
+*…and a clearance-fattened copy of it is subtracted from the other, giving the
+sockets. The two faces mate exactly: the seam is the line you drew, and nothing
+is spent at it.*
+
 ## 5. Create Parts, and export
 
 A finished part is a model in its own right: pick it in **Model** and cut it
@@ -140,6 +163,11 @@ units as millimetres — get the size right. If you already work at 1 unit =
 
 **Easy mode**, at the bottom of the panel, does cut → connectors → parts in one
 click for simple models: pick an axis, then **Cut at Center** or **At Cursor**.
+
+![The finished parts arranged around the body](docs/images/parts-around-the-body.jpg)
+
+*Five cuts, five separations, every part closed and manifold — and between them
+they still add up to exactly the model that went in.*
 
 Cutting a dense model takes a few seconds, and a line that gives the cutter
 trouble takes longer — so **Create Parts** reports as it goes, in the status bar
@@ -169,8 +197,12 @@ where it crosses, because that is what drawing the line over it asks for.
 | Setting | What it does |
 | --- | --- |
 | **Points** | How many draggable points a new line gets (32). Corners always get one, so the count is a guide rather than a rule. More follow a drawn line more closely; fewer are easier to shove about |
-| **Line Lift** | How far above the surface the line is drawn, so the surface cannot swallow it. Drawing only — the cut does not move |
 | **Cut Inside Line Only** | On by default. Off cuts straight through on the flat plane closest to your line, splitting everything it meets |
+| **Snap Connectors** | Re-seat a cut's pins on its surface whenever you finish editing it |
+
+That is the lot. Cut Detail, Falloff and Undercut are gone: they existed to
+manage a cut surface that no longer exists, and there is nothing left to
+tune.
 
 ## Testing
 
@@ -180,10 +212,11 @@ The whole geometry side runs headless — no UI needed:
 blender --background --python-exit-code 1 --python tests/smoke_test.py
 ```
 
-Fifty-odd scenarios covering cuts, connectors, drawing, the line itself, the
-warnings and all three exporters, checking that every part comes out closed and
-manifold. On macOS the binary is usually
-`/Applications/Blender.app/Contents/MacOS/Blender`.
+367 checks over sixty-odd scenarios: the line and how it is walked across the
+model, cutting along it on models from a cube to 441,800 faces, connectors,
+drawing, the warnings and all three exporters — every one of them checking that
+the parts come out closed and manifold and still add up to the model. On macOS
+the binary is usually `/Applications/Blender.app/Contents/MacOS/Blender`.
 
 ## If a cut will not separate
 
@@ -201,17 +234,17 @@ with the piece than the line asks for, which you can trim afterwards.
 
 ## Working on this
 
-The **cut line** is an ordered ring of anchors sitting on the model, kept in the
-model's own space, with the path between consecutive anchors walked across the
-surface — `part_pin/walker.py`. It used to be a height field over a fitted
-plane, which cannot hold a contour that wraps round anything: the line sagged
-away from its own points between them, and where the field could not express
-what was drawn it doubled back on itself.
-[docs/NEXT-geodesic-cut-line.md](docs/NEXT-geodesic-cut-line.md) is the record
-of that rework, what it measured, and what is left.
+Three files carry the whole geometry side, and each opens with what it is for
+and why it is built that way — the comments in them are the design notes:
 
-[docs/NEXT-mesh-surgery-cutter.md](docs/NEXT-mesh-surgery-cutter.md) covers the
-cutter itself — how it works, and what was measured on the way to it.
+- **`part_pin/walker.py`** — the shortest path across the model's surface
+  between two points.
+- **`part_pin/surface.py`** — the cut line: a ring of anchors on the model,
+  with the walker filling in between them.
+- **`part_pin/mesh_cut.py`** — the cutter: a band along the line, the model's
+  own faces cut with it, the two sides parted and capped.
+
+`CLAUDE.md` has the notes for anyone — or anything — working on the internals.
 
 ## Limits worth knowing
 
@@ -224,6 +257,10 @@ cutter itself — how it works, and what was measured on the way to it.
 - Drawing and dragging follow the visible surface, so orbit first to reach the
   far side.
 - Modifiers on the model are baked into the parts.
+- A line drawn round a *perfectly regular* tube — a plain extruded cylinder,
+  where the line runs exactly along the mesh's own edges for whole stretches —
+  can leave the seam a few loose ends. A sculpt's irregular triangulation does
+  not run into it.
 
 ## License
 
