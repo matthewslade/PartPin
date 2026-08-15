@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 PartPin contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Property definitions for PartPin."""
 
 import bpy

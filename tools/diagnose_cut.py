@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 PartPin contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Open a saved .blend and say exactly why a cut will not go through.
 
     ./.venv-bpy/bin/python tools/diagnose_cut.py <file.blend> [cut name]

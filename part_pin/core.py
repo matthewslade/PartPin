@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 PartPin contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Geometry engine for PartPin.
 
 Everything here is UI-free so it can run headless (tests, batch scripts).

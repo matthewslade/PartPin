@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 PartPin contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
 """PartPin — split models into printable parts with pin connectors.
 
 Cuts a closed mesh into parts along a line drawn on the model, adds
@@ -8,7 +10,7 @@ for 3D printing.
 bl_info = {
     "name": "PartPin",
     "author": "PartPin contributors",
-    "version": (1, 24, 1),
+    "version": (1, 25, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport ▸ Sidebar (N) ▸ PartPin",
     "description": ("Split models into printable parts with matching "

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 PartPin contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Headless smoke test for the PartPin add-on.
 
 Run with:
@@ -3104,6 +3106,43 @@ def scenario_the_version_is_shown_and_agrees(core):
           str([c.__name__ for c in ui.CLASSES]))
 
 
+def scenario_the_licence_is_consistent(core):
+    """One licence, said the same way in every place that states one.
+
+    A file added later without a notice, or a manifest that disagrees with
+    the LICENSE beside it, is the kind of thing nobody notices until it
+    matters.
+    """
+    print("Scenario: the licence says the same thing everywhere")
+    import re
+
+    with open(os.path.join(REPO, "LICENSE")) as handle:
+        licence = handle.read()
+    check("LICENSE is the GNU GPL version 3",
+          "GNU GENERAL PUBLIC LICENSE" in licence
+          and "Version 3, 29 June 2007" in licence,
+          licence.split("\n")[1].strip() if licence else "empty")
+
+    manifest = os.path.join(REPO, "part_pin", "blender_manifest.toml")
+    with open(manifest) as handle:
+        written = handle.read()
+    stated = re.search(r'^license = \[(.+)\]', written, re.MULTILINE)
+    check("the manifest says GPL-3.0-or-later",
+          stated and "SPDX:GPL-3.0-or-later" in stated.group(1),
+          stated.group(1) if stated else "no license line")
+
+    shipped = [os.path.join("part_pin", f)
+               for f in sorted(os.listdir(os.path.join(REPO, "part_pin")))
+               if f.endswith(".py")]
+    missing = []
+    for path in shipped + ["tests/smoke_test.py", "tools/diagnose_cut.py"]:
+        with open(os.path.join(REPO, path)) as handle:
+            head = handle.read(400)
+        if "SPDX-License-Identifier: GPL-3.0-or-later" not in head:
+            missing.append(path)
+    check("every source file carries the notice", not missing, str(missing))
+
+
 def scenario_operators_registered(core):
     print("Scenario: new operators registered")
     reset_scene()
@@ -3175,6 +3214,7 @@ def main():
     scenario_a_dense_model_cuts(core)
     scenario_a_cut_says_how_far_along_it_is(core)
     scenario_the_version_is_shown_and_agrees(core)
+    scenario_the_licence_is_consistent(core)
     scenario_operators_registered(core)
     scenario_export(core)  # runs easy mode internally, then exports
 

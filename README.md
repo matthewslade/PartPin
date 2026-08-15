@@ -217,7 +217,7 @@ The whole geometry side runs headless — no UI needed:
 blender --background --python-exit-code 1 --python tests/smoke_test.py
 ```
 
-384 checks over sixty-odd scenarios: the line and how it is walked across the
+389 checks over sixty-odd scenarios: the line and how it is walked across the
 model, cutting along it on models from a cube to 441,800 faces, connectors,
 drawing, the warnings and all three exporters — every one of them checking that
 the parts come out closed and manifold and still add up to the model. On macOS
@@ -269,4 +269,7 @@ and why it is built that way — the comments in them are the design notes:
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+GPL-3.0-or-later — see [LICENSE](LICENSE).
+
+A Blender add-on runs inside Blender and against its Python API, which is
+itself GPL, so this is the licence the add-on belongs under.

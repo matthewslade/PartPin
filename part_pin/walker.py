@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 PartPin contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Walking a cut line across the model's own surface.
 
 A cut line is an ordered ring of anchors sitting on the model, and what runs

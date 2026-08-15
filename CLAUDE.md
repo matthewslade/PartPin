@@ -132,6 +132,14 @@ Bulk array work through `foreach_get`/`foreach_set` is the fix in every case.
 - The walker's `WINDOWS` ladder gives up after the widest search. No fixture
   reaches it, so that path is exercised only by the two-shells test.
 
+## Licensing
+
+GPL-3.0-or-later, which is what a Blender add-on belongs under: it runs inside
+Blender and against its Python API, and those are GPL. `LICENSE` is the
+verbatim FSF text, the manifest declares `SPDX:GPL-3.0-or-later`, and every
+source file carries an SPDX notice at the top. A scenario in the suite checks
+all three agree, so a file added without a notice fails the tests.
+
 ## Testing
 
 ```sh
@@ -139,7 +147,7 @@ Bulk array work through `foreach_get`/`foreach_set` is the fix in every case.
     --python-exit-code 1 --python tests/smoke_test.py
 ```
 
-384 checks. **Run it three times** — a bmesh-ordering bug has twice made
+389 checks. **Run it three times** — a bmesh-ordering bug has twice made
 results vary between runs. It takes about 25 seconds; the dense fixtures are
 built from numpy arrays straight into the mesh, because asking bmesh for a
 441,800-face sphere takes over a minute on its own.

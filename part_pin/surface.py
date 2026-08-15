@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 PartPin contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Cut lines that live on the model's surface — "Edit on Surface".
 
 A cut line is stored as what was drawn: an **ordered ring of anchors sitting

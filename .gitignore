@@ -4,3 +4,4 @@ dist/
 .venv*/
 *.blend1
 .DS_Store
+part_pin/LICENSE

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 PartPin contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
 """The localized cut: sever the model along the line drawn on it.
 
 Nothing here synthesises a surface to cut with. The model's own faces are cut

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 PartPin contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Drawing a cut perimeter straight onto the model.
 
 Hold the left mouse button and draw on the model; every mouse position is

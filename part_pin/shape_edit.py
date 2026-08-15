@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 PartPin contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Interactive on-surface cut editing.
 
 Draws the line where the cut meets the model and lets you drag points

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 PartPin contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Sidebar panels for PartPin (3D Viewport ▸ N-panel ▸ PartPin)."""
 
 import os
