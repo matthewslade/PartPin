@@ -4,8 +4,8 @@ Everything here is UI-free so it can run headless (tests, batch scripts).
 
 Concepts
 --------
-Cut        A draft object the user can edit freely: a wire plane (straight
-           cut) or a 2D curve with extrusion preview (curved cut).
+Cut        A draft object the user can edit freely: a line drawn on the
+           model, or a wire plane for a straight cut.
 Cutter     A closed volume built from a cut at apply time. Splitting is
            part ∩ cutter / part − cutter with the exact boolean solver, so
            both halves come out closed and capped.
@@ -18,7 +18,6 @@ Connector  A draft pin object sitting on the cut, spanning the seam
 import bmesh
 import bpy
 from mathutils import Matrix, Vector
-from mathutils.geometry import interpolate_bezier
 
 DRAFT_COLLECTION = "PartPin Drafts"
 
@@ -89,11 +88,8 @@ def remove_object(obj):
     data = obj.data
     kind = obj.type
     bpy.data.objects.remove(obj)
-    if data is not None and data.users == 0:
-        if kind == 'MESH':
-            bpy.data.meshes.remove(data)
-        elif kind == 'CURVE':
-            bpy.data.curves.remove(data)
+    if data is not None and data.users == 0 and kind == 'MESH':
+        bpy.data.meshes.remove(data)
 
 
 def scene_cuts(scene):
@@ -114,16 +110,25 @@ def cut_connectors(scene, cut):
 # ----------------------------------------------------------------------
 
 def mesh_issues(obj):
-    """Return (non_manifold_edges, boundary_edges) of the evaluated mesh."""
+    """Return (non_manifold_edges, boundary_edges) of the evaluated mesh.
+
+    Counted from how many faces use each edge — two is sound, one is a hole,
+    and anything else is a fold. Read in bulk rather than edge by edge: this
+    is asked of the model and of both halves on every band the cutter tries,
+    and on a 441,616-face model that is a second a time.
+    """
+    import numpy as np
+
     dg = bpy.context.evaluated_depsgraph_get()
     me = bpy.data.meshes.new_from_object(obj.evaluated_get(dg))
-    bm = bmesh.new()
-    bm.from_mesh(me)
-    non_manifold = sum(1 for e in bm.edges if not e.is_manifold)
-    boundary = sum(1 for e in bm.edges if e.is_boundary)
-    bm.free()
-    bpy.data.meshes.remove(me)
-    return non_manifold, boundary
+    try:
+        faces = np.zeros(len(me.edges), dtype=np.int64)
+        corners = np.empty(len(me.loops), dtype=np.int32)
+        me.loops.foreach_get("edge_index", corners)
+        np.add.at(faces, corners, 1)
+        return int((faces != 2).sum()), int((faces == 1).sum())
+    finally:
+        bpy.data.meshes.remove(me)
 
 
 # ----------------------------------------------------------------------
@@ -188,99 +193,11 @@ def make_halfspace_cutter(matrix_world, diag, scene):
     return obj
 
 
-def sample_cut_curve(curve_obj, resolution=16):
-    """Sample the first spline of a cut curve to 2D points in local space."""
-    data = curve_obj.data
-    if not data.splines:
-        return [], False
-    spline = data.splines[0]
-    pts = []
-    if spline.type == 'BEZIER':
-        bp = spline.bezier_points
-        n = len(bp)
-        if n < 2:
-            return [], False
-        segments = n if spline.use_cyclic_u else n - 1
-        for i in range(segments):
-            a = bp[i]
-            b = bp[(i + 1) % n]
-            seg = interpolate_bezier(a.co, a.handle_right, b.handle_left,
-                                     b.co, resolution)
-            pts.extend(seg if i == 0 else seg[1:])
-    else:
-        pts = [p.co.xyz for p in spline.points]
-    pts2d = []
-    for p in pts:
-        q = Vector((p.x, p.y))
-        if not pts2d or (q - pts2d[-1]).length > 1e-9:
-            pts2d.append(q)
-    return pts2d, spline.use_cyclic_u
-
-
-def make_curve_cutter(curve_obj, target, scene):
-    """Closed prism whose curved face follows the drawn cut curve.
-
-    Built in the curve's local space (its XY plane holds the stroke, local Z
-    is the sketch-view direction), then placed with the curve's matrix. The
-    prism covers everything on one side of the stroke, extended well past the
-    target's bounds.
-    """
-    pts, cyclic = sample_cut_curve(curve_obj)
-    if len(pts) < 2:
-        return None
-
-    inv = curve_obj.matrix_world.inverted()
-    corners = [inv @ (target.matrix_world @ Vector(c)) for c in target.bound_box]
-    xs = [c.x for c in corners] + [p.x for p in pts]
-    ys = [c.y for c in corners] + [p.y for p in pts]
-    zs = [c.z for c in corners]
-    extent = max(max(xs) - min(xs), max(ys) - min(ys),
-                 max(zs) - min(zs), 1e-6)
-    big = extent * 4.0
-
-    if cyclic:
-        polygon = pts
-    else:
-        t0 = pts[0] - pts[1]
-        tn = pts[-1] - pts[-2]
-        if t0.length < 1e-9 or tn.length < 1e-9:
-            return None
-        start = pts[0] + t0.normalized() * big
-        end = pts[-1] + tn.normalized() * big
-        floor_y = min(ys) - big
-        polygon = ([start] + pts + [end,
-                    Vector((end.x, floor_y)),
-                    Vector((start.x, floor_y))])
-
-    z_lo = min(zs) - big
-    z_hi = max(zs) + big
-
-    bm = bmesh.new()
-    bottom = [bm.verts.new((p.x, p.y, z_lo)) for p in polygon]
-    try:
-        face = bm.faces.new(bottom)
-    except ValueError:
-        bm.free()
-        return None
-    ret = bmesh.ops.extrude_face_region(bm, geom=[face])
-    top_verts = [g for g in ret['geom'] if isinstance(g, bmesh.types.BMVert)]
-    bmesh.ops.translate(bm, verts=top_verts, vec=(0.0, 0.0, z_hi - z_lo))
-    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
-    bmesh.ops.triangulate(bm, faces=list(bm.faces))
-
-    obj = new_mesh_object("PartPin_Cutter", bm, scene.collection,
-                          matrix=curve_obj.matrix_world.copy())
-    obj.hide_render = True
-    return obj
-
-
 def build_cutter(cut_obj, target, scene):
     if cut_obj.pp_cut_kind == 'SURFACE':
         # Imported here: surface.py builds on this module's helpers.
         from . import surface
         return surface.build_surface_cutter(cut_obj, target, scene)
-    if cut_obj.pp_cut_kind == 'CURVE':
-        return make_curve_cutter(cut_obj, target, scene)
     return make_halfspace_cutter(cut_obj.matrix_world, bbox_diagonal(target),
                                  scene)
 
@@ -482,55 +399,6 @@ def plane_connector_matrices(target, cut, count):
             for w in _pick_spread(good, count)] if good else []
 
 
-def curve_connector_matrices(target, cut, count):
-    """Connector transforms along a drawn cut curve, pins normal to the
-    cut surface (tangent × sketch-view direction). Only spots genuinely
-    inside the model are used."""
-    pts, cyclic = sample_cut_curve(cut, resolution=24)
-    if len(pts) < 2:
-        return []
-    m = cut.matrix_world
-
-    dense = []
-    pairs = list(zip(pts, pts[1:] + ([pts[0]] if cyclic else [])))
-    for a, b in pairs:
-        for i in range(8):
-            dense.append(a.lerp(b, i / 8.0))
-    dense.append(pts[0] if cyclic else pts[-1])
-
-    world_pts = [m @ Vector((p.x, p.y, 0.0)) for p in dense]
-    inside = [i for i, w in enumerate(world_pts) if point_inside(target, w)]
-    if not inside:
-        return []
-
-    extrude_dir = (m.to_quaternion() @ Vector((0.0, 0.0, 1.0))).normalized()
-    matrices = []
-    for idx in _pick_spread(inside, count):
-        prev_i = max(idx - 1, 0)
-        next_i = min(idx + 1, len(world_pts) - 1)
-        tangent = (world_pts[next_i] - world_pts[prev_i])
-        if tangent.length < 1e-9:
-            continue
-        tangent.normalize()
-        pin_axis = tangent.cross(extrude_dir)
-        if pin_axis.length < 1e-9:
-            continue
-        pin_axis.normalize()
-        y_axis = pin_axis.cross(tangent)
-        basis = Matrix((
-            (tangent.x, y_axis.x, pin_axis.x, world_pts[idx].x),
-            (tangent.y, y_axis.y, pin_axis.y, world_pts[idx].y),
-            (tangent.z, y_axis.z, pin_axis.z, world_pts[idx].z),
-            (0.0, 0.0, 0.0, 1.0),
-        ))
-        matrices.append(basis)
-    return matrices
-
-
-# ----------------------------------------------------------------------
-# Apply pipeline
-# ----------------------------------------------------------------------
-
 def split_parts(parts, cutter, parts_coll):
     """Split every part that the cutter volume actually intersects.
 
@@ -586,13 +454,16 @@ def split_loose(obj):
     return pieces
 
 
-def split_parts_surgery(parts, rings, normals, scene, parts_coll,
-                        stuck=None, why=None):
+def split_parts_surgery_steps(parts, rings, normals, scene, parts_coll,
+                              stuck=None, why=None, said=""):
     """Cut every part the drawn line runs across, and leave the rest whole.
 
     A line only ever crosses one of the parts on the table, and it may cross
     none of them if an earlier cut already took that piece away, so a part the
     line misses is not a failure — it is passed through untouched.
+
+    Yields (how far along, what it is doing) as it goes; `said` is what to
+    call this cut in that.
     """
     from . import mesh_cut  # local import: mesh_cut builds on this module
 
@@ -603,8 +474,19 @@ def split_parts_surgery(parts, rings, normals, scene, parts_coll,
     if why is None:
         why = []
     for part in parts:
-        pieces, trouble, spots = mesh_cut.cut_object(
-            part, rings, normals, scene, parts_coll)
+        steps = mesh_cut.cut_object_steps(part, rings, normals, scene,
+                                          parts_coll)
+        while True:
+            try:
+                tried, most = next(steps)
+            except StopIteration as done:
+                pieces, trouble, spots = done.value
+                break
+            # Out of the most tries there could ever be, so a cut that is
+            # struggling fills the bar as it works through them. Nearly every
+            # cut goes through on the first or second, and is done before the
+            # bar means much — which is the good case.
+            yield tried / most, f"{said}cutting — try {tried} of {most}"
         if pieces is None:
             # Keep the closest account of why, so the editor can mark it and
             # the message can say which of the three things went wrong.
@@ -644,8 +526,29 @@ def create_parts(context, target, cuts, keep_original=True, part_gap=0.0,
                  failures=None):
     """Run every enabled cut and connector; return (parts, applied, warnings).
 
-    `failures` collects the reasons any cut could not be made, so the caller
-    can report them as errors rather than letting a cut fail silently.
+    The blocking form of `create_parts_steps`, for scripts and tests.
+    """
+    steps = create_parts_steps(context, target, cuts, keep_original, part_gap,
+                               failures)
+    while True:
+        try:
+            next(steps)
+        except StopIteration as done:
+            return done.value
+
+
+def create_parts_steps(context, target, cuts, keep_original=True,
+                       part_gap=0.0, failures=None):
+    """Run every enabled cut and connector, a step at a time.
+
+    Yields (how far along, what it is doing) and returns
+    (parts, connectors applied, warnings). `failures` collects the reasons any
+    cut could not be made, so the caller can report them as errors rather than
+    letting a cut fail silently.
+
+    Closing this part way through — which is what cancelling does — puts back
+    everything it had made by then, so a cut that is called off leaves the
+    scene exactly as it was found, the same as one that fails.
     """
     scene = context.scene
     warnings = []
@@ -664,87 +567,114 @@ def create_parts(context, target, cuts, keep_original=True, part_gap=0.0,
     # Local imports: both build on this module's helpers.
     from . import mesh_cut, surface
 
-    for cut in cuts:
-        if surface.is_local(cut):
-            rings, normals = mesh_cut.line_rings(cut, target)
-            if rings is None:
-                failures.append(
-                    f"Cut '{cut.name}': "
-                    f"{surface.cut_line_problem(cut, target)}")
+    try:
+        for index, cut in enumerate(cuts):
+            said = (f"cut {index + 1} of {len(cuts)}: " if len(cuts) > 1
+                    else "")
+            share = 1.0 / len(cuts)
+            if surface.is_local(cut):
+                yield index * share, said + "following the line"
+                rings, normals = mesh_cut.line_rings(cut, target)
+                if rings is None:
+                    failures.append(
+                        f"Cut '{cut.name}': "
+                        f"{surface.cut_line_problem(cut, target)}")
+                    continue
+                stuck, why = [], []
+                steps = split_parts_surgery_steps(parts, rings, normals, scene,
+                                                  parts_coll, stuck, why, said)
+                while True:
+                    try:
+                        along, doing = next(steps)
+                    except StopIteration as done:
+                        parts, split_any = done.value
+                        break
+                    yield (index + along) * share, doing
+                surface.remember_stuck(cut, stuck)
+                if not split_any:
+                    # Say why, and leave it at that. Reaching further to force
+                    # a separation would cut material outside the line, which
+                    # is the one thing this mode promises not to do.
+                    failures.append(
+                        f"Cut '{cut.name}': "
+                        f"{surface.failure_reason(stuck, why[0] if why else None)}")
                 continue
-            stuck, why = [], []
-            parts, split_any = split_parts_surgery(parts, rings, normals,
-                                                   scene, parts_coll,
-                                                   stuck, why)
-            surface.remember_stuck(cut, stuck)
+
+            yield index * share, said + "cutting right through"
+            cutter = build_cutter(cut, target, scene)
+            if cutter is None:
+                warnings.append(
+                    f"Cut '{cut.name}' has no usable geometry — skipped")
+                continue
+            parts, split_any = split_parts(parts, cutter, parts_coll)
             if not split_any:
-                # Say why, and leave it at that. Reaching further to force a
-                # separation would cut material outside the line, which is
-                # the one thing this mode promises not to do.
-                failures.append(
-                    f"Cut '{cut.name}': "
-                    f"{surface.failure_reason(stuck, why[0] if why else None)}")
-            continue
+                warnings.append(f"Cut '{cut.name}' did not split anything")
+            remove_object(cutter)
 
-        cutter = build_cutter(cut, target, scene)
-        if cutter is None:
-            warnings.append(f"Cut '{cut.name}' has no usable geometry — skipped")
-            continue
-        parts, split_any = split_parts(parts, cutter, parts_coll)
-        if not split_any:
-            warnings.append(f"Cut '{cut.name}' did not split anything")
-        remove_object(cutter)
+        context.view_layer.update()
 
-    context.view_layer.update()
+        if len(parts) < 2 and failures:
+            # Nothing was cut, so leave the scene as it was found: the one
+            # "part" is a copy of the model and its collection is empty of
+            # meaning, and clearing them away is what lets the cut stay put
+            # and stay editable. Having to undo to get a failed cut back is
+            # worse than the failure.
+            _put_back(parts, parts_coll)
+            return [], 0, warnings
 
-    if len(parts) < 2 and failures:
-        # Nothing was cut, so leave the scene as it was found: the one "part"
-        # is a copy of the model and its collection is empty of meaning, and
-        # clearing them away is what lets the cut stay put and stay editable.
-        # Having to undo to get a failed cut back is worse than the failure.
-        for part in parts:
-            remove_object(part)
-        try:
-            bpy.data.collections.remove(parts_coll)
-        except Exception:
-            pass
-        return [], 0, warnings
-
-    applied = 0
-    if len(parts) > 1:
-        for cut in cuts:
-            for conn in cut_connectors(scene, cut):
+        applied = 0
+        if len(parts) > 1:
+            pins = [conn for cut in cuts
+                    for conn in cut_connectors(scene, cut)]
+            for number, conn in enumerate(pins, start=1):
+                yield 1.0, f"fitting connector {number} of {len(pins)}"
                 if apply_connector(parts, conn, scene, warnings):
                     applied += 1
                 context.view_layer.update()
-    elif any(cut_connectors(scene, cut) for cut in cuts):
-        warnings.append("Nothing was split — connectors were not applied")
+        elif any(cut_connectors(scene, cut) for cut in cuts):
+            warnings.append("Nothing was split — connectors were not applied")
 
-    for i, part in enumerate(parts, start=1):
-        part.name = f"{target.name}_part_{i:02d}"
-        part.data.name = part.name
-        part.pp_role = ROLE_PART
+        for i, part in enumerate(parts, start=1):
+            part.name = f"{target.name}_part_{i:02d}"
+            part.data.name = part.name
+            part.pp_role = ROLE_PART
 
-    if part_gap > 0.0 and len(parts) > 1:
-        centers = {}
-        total = Vector()
-        for part in parts:
-            lo, hi = world_bbox(part)
-            centers[part] = (lo + hi) / 2.0
-            total += centers[part]
-        overall = total / len(parts)
-        for part in parts:
-            direction = centers[part] - overall
-            if direction.length > 1e-9:
-                part.matrix_world.translation += (
-                    direction.normalized() * part_gap)
+        if part_gap > 0.0 and len(parts) > 1:
+            centers = {}
+            total = Vector()
+            for part in parts:
+                lo, hi = world_bbox(part)
+                centers[part] = (lo + hi) / 2.0
+                total += centers[part]
+            overall = total / len(parts)
+            for part in parts:
+                direction = centers[part] - overall
+                if direction.length > 1e-9:
+                    part.matrix_world.translation += (
+                        direction.normalized() * part_gap)
 
-    if keep_original:
-        target.hide_set(True)
-    else:
-        remove_object(target)
+        if keep_original:
+            target.hide_set(True)
+        else:
+            remove_object(target)
+    except GeneratorExit:
+        # Called off. Put back what had been made: a cut that is stopped has
+        # to leave the model and the cuts exactly where they were, the same as
+        # one that fails.
+        _put_back(parts, parts_coll)
+        raise
 
     return parts, applied, warnings
+
+
+def _put_back(parts, parts_coll):
+    """Clear away the parts made so far, and the collection holding them."""
+    for part in parts:
+        remove_object(part)
+    try:
+        bpy.data.collections.remove(parts_coll)
+    except Exception:
+        pass
 
 
 def hide_drafts(scene, hide=True):

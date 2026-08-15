@@ -69,12 +69,20 @@ REPAIR_REACH = 0.04
 # before — a crease that shrugged off one go may still give way to three.
 REPAIR_ROUNDS = 3
 
+# The most bands a cut can ever try: the plain ladder, then a round of it per
+# round of repair. Only used to say how far along a cut is.
+MOST_ATTEMPTS = len(BAND_LADDER) * (1 + REPAIR_ROUNDS)
+
 # How close two samples may be before one of them is dropped, as a share of
 # the average spacing along the line. Two samples in the same place make a
 # band quad with no area, and no intersection can be found against nothing —
 # the seam simply breaks there, at every height, which is a red mark that will
 # not shift however much the band is raised.
 BAND_MIN_GAP = 0.15
+
+# How far to one side the band's copy of the line is moved, as a share of the
+# model's size, to keep it off the model's own edges. See `_off_the_edges`.
+EDGE_CLEAR = 1e-6
 
 # And how much longer than the rest a gap may be before it is filled in.
 # Projecting onto a dense model can leave two neighbouring samples far apart —
@@ -100,15 +108,16 @@ BAND_MAX_GAP = 1.6
 # anchors dragged into one, where the two sides lie on the same patch and
 # face within a few degrees of each other. What is left in between is the
 # root of a fin, where a line coming round it reads about 40 degrees on a
-# cut that works — so this sits between that and the 23 the real ones came in
-# at, rather than halfway to the fin's own 180.
-# How far apart two stretches have to be *along the line* before being close
-# in space says anything, as a multiple of that closeness. Counted in samples
-# instead, this said nothing at all on a dense model: the line is walked
-# across the model's own faces, so a 441,616-face sculpt gives a ring of two
-# thousand samples, six of them apart is a fraction of a millimetre, and
-# every neighbour within a hundredth of the model reads as a doubling back —
-# twelve thousand of them on a line that cuts perfectly well.
+# cut that works — so PINCH_ALIKE sits between that and the 23 the real ones
+# came in at, rather than halfway to the fin's own 180.
+#
+# PINCH_APART is how far apart two stretches have to be *along the line*
+# before being close in space says anything, as a multiple of that closeness.
+# Counted in samples instead it said nothing at all on a dense model: a
+# 441,616-face sculpt gives a ring of two thousand samples, six of them apart
+# is a fraction of a millimetre, and every neighbour within a hundredth of the
+# model reads as a doubling back — twelve thousand of them on a line that cuts
+# perfectly well.
 PINCH_NEAR = 0.01
 PINCH_APART = 3.0
 PINCH_ALIKE = 30.0
@@ -237,6 +246,39 @@ def _filled(ring, target, rounds=4):
     return ring
 
 
+def _select_model_not_band(data):
+    """Select the model's faces and leave the band's unselected.
+
+    Walked element by element in Python this is most of what a cut costs: a
+    441,616-face model is that many round trips through RNA, three times over,
+    for every band the ladder tries. Read and written in bulk it is a handful
+    of array operations.
+    """
+    import numpy as np
+
+    faces = len(data.polygons)
+    tags = np.empty(faces, dtype=np.int32)
+    data.attributes[BAND_TAG].data.foreach_get("value", tags)
+    on_model = tags == 0
+    data.polygons.foreach_set("select", on_model)
+
+    # A vertex counts as selected when a model face uses it, and an edge when
+    # both of its vertices are — which is what walking the polygons and then
+    # the edges came to.
+    totals = np.empty(faces, dtype=np.int32)
+    data.polygons.foreach_get("loop_total", totals)
+    corners = np.empty(len(data.loops), dtype=np.int32)
+    data.loops.foreach_get("vertex_index", corners)
+    chosen = np.zeros(len(data.vertices), dtype=bool)
+    chosen[corners[np.repeat(on_model, totals)]] = True
+    data.vertices.foreach_set("select", chosen)
+
+    ends = np.empty(len(data.edges) * 2, dtype=np.int32)
+    data.edges.foreach_get("vertices", ends)
+    ends = ends.reshape(-1, 2)
+    data.edges.foreach_set("select", chosen[ends[:, 0]] & chosen[ends[:, 1]])
+
+
 def _work_object(obj, rings, normals, heights, scene):
     """The object's mesh with a band standing along each ring, ready to cut.
 
@@ -285,18 +327,7 @@ def _work_object(obj, rings, normals, heights, scene):
     data = bpy.data.meshes.new("PartPin_Work")
     bm.to_mesh(data)
     bm.free()
-
-    tags = data.attributes.get(BAND_TAG)
-    for poly in data.polygons:
-        poly.select = not tags.data[poly.index].value
-    for vert in data.vertices:
-        vert.select = False
-    for poly in data.polygons:
-        if poly.select:
-            for index in poly.vertices:
-                data.vertices[index].select = True
-    for edge in data.edges:
-        edge.select = all(data.vertices[i].select for i in edge.vertices)
+    _select_model_not_band(data)
 
     work = bpy.data.objects.new("PartPin_Work", data)
     scene.collection.objects.link(work)
@@ -340,16 +371,21 @@ def _repaired(rings, heights, spots, round_no=0):
 
 
 def _regions(bm, layer, seam):
-    """The model's faces grouped into what the seam separates them into."""
-    seen, groups = set(), []
+    """How many of the model's faces are in each piece the seam makes.
+
+    Counted rather than collected: on a 441,616-face model the faces
+    themselves are half a million Python references built for the sake of
+    asking how many groups there are.
+    """
+    seen, sizes = set(), []
     for face in bm.faces:
         if face[layer] or face in seen:
             continue
-        stack, group = [face], []
+        stack, size = [face], 0
         seen.add(face)
         while stack:
             current = stack.pop()
-            group.append(current)
+            size += 1
             for edge in current.edges:
                 if edge in seam:
                     continue
@@ -358,8 +394,8 @@ def _regions(bm, layer, seam):
                         continue
                     seen.add(other)
                     stack.append(other)
-        groups.append(group)
-    return groups
+        sizes.append(size)
+    return sizes
 
 
 def _cut_surface(obj, rings, normals, heights, scene):
@@ -554,6 +590,19 @@ CAP_EVENING = 2        # evening-out passes per step
 CAP_MIN_RING = 12
 CAP_BACKOFF = 5        # halvings of a step before the rings stop
 
+# The most points a ring inside the rim is given. The rim itself is as dense
+# as the model's faces make it — a thousand points on a sculpt — and the
+# middle of a cap has no use for that: every step inwards was being offered,
+# checked for crossing itself and thrown away at that density, which is an
+# O(n²) test seventy-five times over and took half a minute on one cut. It is
+# also why none of the steps held: a ring carrying every wobble of the rim
+# crosses itself the moment it is drawn in.
+CAP_MAX_RING = 96
+
+# How far a band's triangles may come from covering the area between its two
+# rings before the band is called folded, as a share of that area.
+BAND_SLACK = 1e-2
+
 
 def cap_normal(rim):
     """Which way to look at a rim to fill it in.
@@ -635,7 +684,7 @@ def _step_in(ring, distance):
 def _next_ring(current, distance, evening):
     """One step in from `current`: thinned, evened out, stepped in, settled
     flatter. None if it will not hold at that distance."""
-    count = int(len(current) * CAP_THINNING)
+    count = min(int(len(current) * CAP_THINNING), CAP_MAX_RING)
     if count < CAP_MIN_RING:
         return None
     evened = surface.resample_loop(current, min(count, len(current)),
@@ -690,10 +739,17 @@ def _band_tiles(outer, inner, band, points):
     """Whether a band covers the space between two rings once and once only.
 
     Both rings lie over the cut's plane, so the band between them has to come
-    to exactly the area between them: any less and there is a hole, any more
-    and two of its triangles overlap, which is a cap doubling back on itself.
+    to about the area between them: much less and there is a hole, much more
+    and its triangles overlap, which is a cap doubling back on itself.
     Checked band by band, so a line that only allows two rings keeps those two
     instead of losing the lot.
+
+    "About" and not "exactly", because the rim is as dense as the model's own
+    faces: a thousand points of a sculpt wobble against their own plane, and
+    the area they enclose and the area of the triangles filling them differ in
+    the fourth decimal place however sound the band is. Held to the exact
+    figure, every band on a real model was thrown away and the cap came out
+    flat — while a band that has really folded is out by whole percent.
     """
     want = _flat_area(outer) - _flat_area(inner)
     if want <= 0.0:
@@ -703,7 +759,7 @@ def _band_tiles(outer, inner, band, points):
         pa, pb, pc = points[a], points[b], points[c]
         covered += abs((pb.x - pa.x) * (pc.y - pa.y)
                        - (pb.y - pa.y) * (pc.x - pa.x))
-    return abs(covered * 0.5 - want) <= want * 1e-6
+    return abs(covered * 0.5 - want) <= want * BAND_SLACK
 
 
 def _settle_ring(ring):
@@ -787,9 +843,13 @@ def _aligned(loop, positions):
     if count != len(positions):
         return None
     # Anything closer than a fraction of the gap between neighbouring points
-    # is the same point; there is nothing else it could be.
-    spacing = min((positions[i] - positions[i - 1]).length
-                  for i in range(count))
+    # is the same point; there is nothing else it could be. Measured on the
+    # average gap, not the smallest: a rim carries the odd pair of points
+    # almost on top of each other, and going by the smallest leaves a
+    # tolerance finer than the two halves agree to — which reads as the two
+    # rims being different rims, and neither half gets capped at all.
+    spacing = sum((positions[i] - positions[i - 1]).length
+                  for i in range(count)) / count
     close = max(spacing * 0.25, 1e-12) ** 2
 
     start = min(range(count),
@@ -802,7 +862,12 @@ def _aligned(loop, positions):
     return None
 
 
-def _weld_rim(bm):
+# How close two rim vertices have to be to count as the same one, as a share
+# of the model's size.
+WELD = 1e-7
+
+
+def _weld_rim(bm, distance):
     """Merge rim vertices sitting exactly on top of one another.
 
     Cutting the line into the model's faces leaves the odd pair of vertices
@@ -813,14 +878,17 @@ def _weld_rim(bm):
     the cap comes out with a handful of holes in it and the part will not
     print. They are the same point by any measure, so merging them takes
     nothing away.
+
+    `distance` is handed in rather than worked out from what is in front of
+    it, and this matters: the two halves are the same rim, but one of them is
+    the whole body and the other a hand. Measured against each piece's own
+    size the two weld differently — 936 vertices against 989 on the model
+    this was found on — and rims that no longer hold the same points cannot
+    be capped with the same polygon, so both halves came out open.
     """
     rim = [v for v in bm.verts if v.is_boundary]
-    if not rim:
-        return
-    lo = [min(v.co[i] for v in bm.verts) for i in range(3)]
-    hi = [max(v.co[i] for v in bm.verts) for i in range(3)]
-    span = max(hi[i] - lo[i] for i in range(3))
-    bmesh.ops.remove_doubles(bm, verts=rim, dist=max(span, 1e-9) * 1e-7)
+    if rim:
+        bmesh.ops.remove_doubles(bm, verts=rim, dist=distance)
 
 
 def _cap_all(pieces):
@@ -837,11 +905,17 @@ def _cap_all(pieces):
     features has a different plane per line, and one shared frame could only
     ever suit one of them.
     """
+    # One distance for every piece, measured on all of them together: they
+    # were one model a moment ago and their rims have to stay the same rim.
+    corners = [corner for piece in pieces for corner in piece.bound_box]
+    span = max(max(max(c[i] for c in corners) - min(c[i] for c in corners)
+                   for i in range(3)), 1e-9)
+
     opened = []
     for piece in pieces:
         bm = bmesh.new()
         bm.from_mesh(piece.data)
-        _weld_rim(bm)
+        _weld_rim(bm, span * WELD)
         opened.append((piece, bm, _boundary_loops(bm)))
 
     plans, ok = [], True
@@ -924,12 +998,30 @@ def _drop_tag(pieces):
 
 
 def cut_object(obj, rings, normals, scene, collection=None):
-    """Sever `obj` along the ring. Returns (pieces, problem).
+    """Sever `obj` along the ring. Returns (pieces, problem, spots).
 
-    Returns (pieces, problem, spots). `pieces` is what it fell into when it
-    worked and None when it did not; the object itself is left untouched
-    either way. `spots` are the places along the line the cut could not be
-    carried through — world positions, for marking on the model.
+    The blocking form of `cut_object_steps`, for scripts and tests.
+    """
+    steps = cut_object_steps(obj, rings, normals, scene, collection)
+    while True:
+        try:
+            next(steps)
+        except StopIteration as done:
+            return done.value
+
+
+def cut_object_steps(obj, rings, normals, scene, collection=None):
+    """Sever `obj` along the ring, a band at a time.
+
+    Yields (band tried, bands there could be) before each attempt and returns
+    (pieces, problem, spots). `pieces` is what it fell into when it worked and
+    None when it did not; the object itself is left untouched either way.
+    `spots` are the places along the line the cut could not be carried
+    through — world positions, for marking on the model.
+
+    Handed out an attempt at a time because on a real model each one takes a
+    couple of seconds and there can be twenty of them: whoever is driving this
+    gets to say how far along it is, and to stop it.
     """
     collection = collection or scene.collection
     # Everything below reads the *evaluated* mesh, and an object made a moment
@@ -959,7 +1051,8 @@ def cut_object(obj, rings, normals, scene, collection=None):
             if not mended_any:
                 return  # nothing came apart, so there is nothing to mend
 
-    for heights in attempts():
+    for number, heights in enumerate(attempts(), start=1):
+        yield number, MOST_ATTEMPTS
         try:
             found, loose = _cut_surface(obj, rings, normals, heights, scene)
         except CutterBusy:
@@ -984,8 +1077,8 @@ def cut_object(obj, rings, normals, scene, collection=None):
             trouble = UNCAPPED
             continue
         # A rung is only accepted on the evidence that it worked: the model
-        # in pieces, and between them no more open or non-manifold edges than
-        # it had to begin with. Anything else and the band gets another go.
+        # in pieces, and between them all but a few of the edges the seam is
+        # made of closed up.
         now = [sum(counts) for counts in
                zip(*(core.mesh_issues(p) for p in pieces))]
         if len(pieces) >= 2 and now[0] <= was[0] and now[1] <= was[1]:
@@ -996,6 +1089,35 @@ def cut_object(obj, rings, normals, scene, collection=None):
         for piece in pieces:
             core.remove_object(piece)
     return None, trouble, spots
+
+
+def _off_the_edges(ring, along, diagonal):
+    """The ring shifted a hair sideways, across the surface.
+
+    The line is walked across the model's own faces, and a line drawn round
+    anything extruded — a limb, a handle, a printed part — runs *along* the
+    model's own edges for whole stretches of it. The band standing on it then
+    contains those edges exactly, the solver is asked to cut a mesh along an
+    edge it already has, and what comes back is pairs of vertices in the same
+    place: the seam breaks at every one of them. Measured on a 441,800-face
+    tube, 86 loose ends the length of the collar.
+
+    Moved a hundred-thousandth of the model to one side, the band crosses the
+    faces cleanly and the seam closes exactly. That is a thousandth of the
+    tolerance the seam is held to, and a fiftieth of the size of one face on
+    a model that dense — the line the user sees does not move at all, only
+    the copy the band is built on.
+    """
+    count = len(ring)
+    shifted = []
+    for i, point in enumerate(ring):
+        tangent = ring[(i + 1) % count] - ring[i - 1]
+        sideways = tangent.cross(along[i]) if tangent.length > 1e-12 else None
+        if sideways is None or sideways.length < 1e-12:
+            shifted.append(point.copy())
+            continue
+        shifted.append(point + sideways.normalized() * diagonal * EDGE_CLEAR)
+    return shifted
 
 
 def line_rings(cut, target):
@@ -1013,4 +1135,7 @@ def line_rings(cut, target):
     rings = [ring for ring in rings if len(ring) >= 3]
     if not rings:
         return None, None
-    return rings, [ring_normals(ring, target) for ring in rings]
+    normals = [ring_normals(ring, target) for ring in rings]
+    diagonal = core.bbox_diagonal(target)
+    return ([_off_the_edges(ring, along, diagonal)
+             for ring, along in zip(rings, normals)], normals)

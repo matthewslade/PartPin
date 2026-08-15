@@ -58,10 +58,9 @@ enough to close on it. Corners are kept: a point lands on each corner you
 draw, so a line round a boxy shape keeps its corners instead of being rounded
 off.
 
-**Or start from a shape** if that suits the model better — a **Straight** cut
-plane you move and rotate like any object, or **Draw Across Model** for a
-single stroke that cuts along your view direction. Either can then be edited on
-the surface exactly like a drawn line.
+**Or cut straight across** if that suits the model better — a **Straight** cut
+plane you move and rotate like any object. It can then be edited on the surface
+exactly like a drawn line.
 
 ## 3. Adjust the line on the model
 
@@ -141,6 +140,11 @@ units as millimetres — get the size right. If you already work at 1 unit =
 
 **Easy mode**, at the bottom of the panel, does cut → connectors → parts in one
 click for simple models: pick an axis, then **Cut at Center** or **At Cursor**.
+
+Cutting a dense model takes a few seconds, and a line that gives the cutter
+trouble takes longer — so **Create Parts** reports as it goes, in the status bar
+and in the panel: which cut, which attempt, and how far along. **Esc** stops it
+and puts everything back exactly as it was.
 
 ## What the cut actually does
 

@@ -185,92 +185,6 @@ class PARTPIN_OT_add_plane_cut(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class PARTPIN_OT_add_curve_cut(bpy.types.Operator):
-    bl_idname = "partpin.add_curve_cut"
-    bl_label = "Draw Curved Cut"
-    bl_description = (
-        "Draw a freehand cut line across the model in the viewport. "
-        "The cut goes through the model along your current view direction. "
-        "Draw one stroke from outside one silhouette edge to outside the "
-        "other, then press Finish Drawing"
-    )
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        return (core.get_settings(context).target is not None
-                and context.area is not None
-                and context.area.type == 'VIEW_3D'
-                and context.region_data is not None)
-
-    def execute(self, context):
-        _ensure_object_mode(context)
-        s = core.get_settings(context)
-        target = s.target
-        scene = context.scene
-        lo, hi = core.world_bbox(target)
-        center = (lo + hi) / 2.0
-
-        rotation = context.region_data.view_rotation.copy()
-        data = bpy.data.curves.new("Cut Curve", 'CURVE')
-        data.dimensions = '2D'
-        data.fill_mode = 'NONE'
-        cut = bpy.data.objects.new("Cut Curve", data)
-        draft = core.ensure_collection(scene, core.DRAFT_COLLECTION)
-        draft.objects.link(cut)
-        cut.matrix_world = Matrix.LocRotScale(center, rotation,
-                                              Vector((1, 1, 1)))
-        cut.pp_role = core.ROLE_CUT
-        cut.pp_cut_kind = 'CURVE'
-        cut.pp_enabled = True
-        cut.pp_index = len(core.scene_cuts(scene)) - 1
-        cut.show_in_front = True
-        cut.hide_render = True
-
-        scene.cursor.location = center
-        _select_only(context, [cut])
-        bpy.ops.object.mode_set(mode='EDIT')
-        bpy.ops.wm.tool_set_by_id(name="builtin.draw")
-        paint = scene.tool_settings.curve_paint_settings
-        paint.depth_mode = 'CURSOR'
-        paint.curve_type = 'BEZIER'
-        self.report({'INFO'},
-                    "Draw one stroke across the model, then click Finish Drawing")
-        return {'FINISHED'}
-
-
-class PARTPIN_OT_finish_curve_cut(bpy.types.Operator):
-    bl_idname = "partpin.finish_curve_cut"
-    bl_label = "Finish Drawing"
-    bl_description = "Confirm the drawn stroke and preview the cut surface"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        obj = context.view_layer.objects.active
-        return (obj is not None and obj.type == 'CURVE'
-                and obj.pp_role == core.ROLE_CUT and obj.mode == 'EDIT')
-
-    def execute(self, context):
-        cut = context.view_layer.objects.active
-        bpy.ops.object.mode_set(mode='OBJECT')
-        s = core.get_settings(context)
-        pts, _cyclic = core.sample_cut_curve(cut)
-        if len(pts) < 2:
-            core.remove_object(cut)
-            self.report({'WARNING'}, "No stroke was drawn — cut removed")
-            return {'CANCELLED'}
-        if len(cut.data.splines) > 1:
-            self.report({'WARNING'},
-                        "Multiple strokes drawn — only the first is used")
-        if s.target is not None:
-            inv = cut.matrix_world.inverted()
-            corners = [inv @ (s.target.matrix_world @ Vector(c))
-                       for c in s.target.bound_box]
-            cut.data.extrude = max(abs(c.z) for c in corners) * 1.3
-        return {'FINISHED'}
-
-
 class PARTPIN_OT_cut_select(bpy.types.Operator):
     bl_idname = "partpin.cut_select"
     bl_label = "Select Cut"
@@ -396,8 +310,6 @@ class PARTPIN_OT_add_connectors(bpy.types.Operator):
             matrices = surface.surface_connector_matrices(
                 target, cut, s.count,
                 inset=s.size * 0.5 + s.clearance)
-        elif cut.pp_cut_kind == 'CURVE':
-            matrices = core.curve_connector_matrices(target, cut, s.count)
         else:
             matrices = core.plane_connector_matrices(target, cut, s.count)
         if not matrices:
@@ -474,12 +386,24 @@ class PARTPIN_OT_flip_pin(bpy.types.Operator):
 # Finalize
 # ----------------------------------------------------------------------
 
+# What Create Parts is doing right now, for the panel to show while it runs.
+# (fraction done, what it is doing), or None between runs.
+RUNNING = None
+
+
+def progress_bar(fraction, width=22):
+    """A bar made of blocks — the status bar takes text and nothing else."""
+    filled = max(0, min(width, int(round(fraction * width))))
+    return "█" * filled + "░" * (width - filled)
+
+
 class PARTPIN_OT_create_parts(bpy.types.Operator):
     bl_idname = "partpin.create_parts"
     bl_label = "Create Parts"
     bl_description = (
         "Apply every enabled cut and connector and put the final parts in "
-        "a new collection. The original model is kept (hidden) by default"
+        "a new collection. The original model is kept (hidden) by default. "
+        "Esc stops it and puts everything back"
     )
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -487,35 +411,45 @@ class PARTPIN_OT_create_parts(bpy.types.Operator):
     def poll(cls, context):
         return core.get_settings(context).target is not None
 
-    def execute(self, context):
+    # ------------------------------------------------------------------
+    # Shared setup
+    # ------------------------------------------------------------------
+
+    def _begin(self, context):
+        """Everything both forms do first. Returns the steps, or None."""
+        global RUNNING
+        RUNNING = None
         _ensure_object_mode(context)
         s = core.get_settings(context)
-        scene = context.scene
         target = _validated_target(self, context, s)
         if target is None:
-            return {'CANCELLED'}
-        cuts = [c for c in core.scene_cuts(scene) if c.pp_enabled]
-        if not cuts:
+            return None
+        self.cuts = [c for c in core.scene_cuts(context.scene)
+                     if c.pp_enabled]
+        if not self.cuts:
             self.report({'ERROR'}, "Add at least one cut first")
-            return {'CANCELLED'}
-
-        failures = []
-        parts, applied, warnings = core.create_parts(
-            context, target, cuts,
+            return None
+        self.failures = []
+        return core.create_parts_steps(
+            context, target, self.cuts,
             keep_original=s.keep_original,
             part_gap=s.part_gap,
-            failures=failures,
+            failures=self.failures,
         )
+
+    def _finished(self, context, parts, applied, warnings):
+        s = core.get_settings(context)
+        scene = context.scene
         for w in warnings:
             self.report({'WARNING'}, w)
-        for f in failures:
+        for f in self.failures:
             self.report({'ERROR'}, f)
 
         if not parts:
             # Nothing was made, so nothing is put away. The cuts stay where
             # they are, visible and editable, with the model still showing —
             # there is a line to fix, and it has to be there to fix it.
-            _select_only(context, [c for c in cuts])
+            _select_only(context, list(self.cuts))
             return {'CANCELLED'}
 
         if s.keep_original:
@@ -531,6 +465,100 @@ class PARTPIN_OT_create_parts(bpy.types.Operator):
         self.report({'INFO'},
                     f"Created {len(parts)} part(s) with {applied} connector(s)")
         return {'FINISHED'}
+
+    # ------------------------------------------------------------------
+    # Run it in one go: scripts, and the test suite
+    # ------------------------------------------------------------------
+
+    def execute(self, context):
+        steps = self._begin(context)
+        if steps is None:
+            return {'CANCELLED'}
+        while True:
+            try:
+                next(steps)
+            except StopIteration as done:
+                parts, applied, warnings = done.value
+                return self._finished(context, parts, applied, warnings)
+
+    # ------------------------------------------------------------------
+    # Run it a step at a time, so it can be watched and stopped
+    # ------------------------------------------------------------------
+
+    def invoke(self, context, event):
+        """A cut takes seconds per attempt and there can be twenty of them.
+
+        Run straight through, Blender freezes for the whole minute with
+        nothing to say for itself. So it is run an attempt at a time on a
+        timer: between them the screen redraws, the bar moves, and Esc is
+        heard.
+        """
+        self.steps = self._begin(context)
+        if self.steps is None:
+            return {'CANCELLED'}
+        self.stopping = False
+        self._show(context, 0.0, "starting")
+        context.window_manager.progress_begin(0.0, 1.0)
+        self._timer = context.window_manager.event_timer_add(
+            0.01, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def _show(self, context, fraction, doing):
+        global RUNNING
+        RUNNING = (fraction, doing)
+        context.workspace.status_text_set(
+            f"Creating parts  {progress_bar(fraction)}  "
+            f"{int(fraction * 100)}% — {doing}    Esc: stop")
+        for area in context.screen.areas:
+            if area.type in {'VIEW_3D', 'PROPERTIES'}:
+                area.tag_redraw()
+
+    def _stop(self, context):
+        global RUNNING
+        RUNNING = None
+        context.workspace.status_text_set(None)
+        context.window_manager.progress_end()
+        if getattr(self, "_timer", None) is not None:
+            context.window_manager.event_timer_remove(self._timer)
+            self._timer = None
+        for area in context.screen.areas:
+            area.tag_redraw()
+
+    def modal(self, context, event):
+        # Esc only: a stray right-click should not throw away a minute of
+        # cutting.
+        if event.type == 'ESC' and event.value == 'PRESS':
+            self.stopping = True
+            self._show(context, 1.0, "stopping, putting everything back")
+            return {'RUNNING_MODAL'}
+        if event.type != 'TIMER':
+            return {'RUNNING_MODAL'}
+
+        if self.stopping:
+            self.steps.close()  # puts back whatever it had made
+            self._stop(context)
+            _select_only(context, list(self.cuts))
+            self.report({'INFO'}, "Stopped — nothing was changed")
+            return {'CANCELLED'}
+
+        try:
+            fraction, doing = next(self.steps)
+        except StopIteration as done:
+            parts, applied, warnings = done.value
+            self._stop(context)
+            return self._finished(context, parts, applied, warnings)
+        except Exception as exc:  # a failure here must not wedge the modal
+            self._stop(context)
+            self.report({'ERROR'}, f"The cut could not be run: {exc}")
+            return {'CANCELLED'}
+        context.window_manager.progress_update(fraction)
+        self._show(context, fraction, doing)
+        return {'RUNNING_MODAL'}
+
+    def cancel(self, context):
+        self.steps.close()
+        self._stop(context)
 
 
 class PARTPIN_OT_easy_cut(bpy.types.Operator):
@@ -685,8 +713,6 @@ CLASSES = (
     PARTPIN_OT_check_mesh,
     PARTPIN_OT_auto_size,
     PARTPIN_OT_add_plane_cut,
-    PARTPIN_OT_add_curve_cut,
-    PARTPIN_OT_finish_curve_cut,
     PARTPIN_OT_cut_select,
     PARTPIN_OT_cut_toggle,
     PARTPIN_OT_cut_remove,

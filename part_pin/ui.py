@@ -2,7 +2,7 @@
 
 import bpy
 
-from . import core
+from . import core, ops
 
 
 class PARTPIN_PT_base:
@@ -21,7 +21,8 @@ class PARTPIN_PT_main(PARTPIN_PT_base, bpy.types.Panel):
         layout.prop(s, "target")
         row = layout.row(align=True)
         row.operator("partpin.check_mesh", icon='CHECKMARK')
-        layout.label(text="Needs a closed, manifold mesh", icon='INFO')
+        layout.label(text="A closed, manifold mesh cuts cleanest",
+                     icon='INFO')
 
 
 class PARTPIN_PT_cuts(PARTPIN_PT_base, bpy.types.Panel):
@@ -35,16 +36,6 @@ class PARTPIN_PT_cuts(PARTPIN_PT_base, bpy.types.Panel):
         scene = context.scene
 
         active = context.view_layer.objects.active
-        drawing = (active is not None and active.type == 'CURVE'
-                   and active.pp_role == core.ROLE_CUT
-                   and active.mode == 'EDIT')
-        if drawing:
-            col = layout.column()
-            col.scale_y = 1.6
-            col.operator("partpin.finish_curve_cut", icon='CHECKMARK')
-            layout.label(text="Draw one stroke across the model", icon='GREASEPENCIL')
-            return
-
         col = layout.column()
         col.scale_y = 1.5
         col.operator("partpin.draw_cut_line", icon='GREASEPENCIL',
@@ -53,13 +44,11 @@ class PARTPIN_PT_cuts(PARTPIN_PT_base, bpy.types.Panel):
                      icon='INFO')
 
         box = layout.box()
-        box.label(text="Or start from a shape", icon='MESH_PLANE')
+        box.label(text="Or cut straight across", icon='MESH_PLANE')
         row = box.row(align=True)
         row.operator("partpin.add_plane_cut", icon='MESH_PLANE',
                      text="Straight")
         row.prop(s, "plane_axis", text="")
-        box.operator("partpin.add_curve_cut", icon='CURVE_BEZCURVE',
-                     text="Draw Across Model")
 
         cuts = core.scene_cuts(scene)
         if cuts:
@@ -69,10 +58,9 @@ class PARTPIN_PT_cuts(PARTPIN_PT_base, bpy.types.Panel):
                 icon = 'CHECKBOX_HLT' if cut.pp_enabled else 'CHECKBOX_DEHLT'
                 row.operator("partpin.cut_toggle", text="", icon=icon,
                              emboss=False).cut_name = cut.name
-                kind_icon = {
-                    'CURVE': 'CURVE_BEZCURVE',
-                    'SURFACE': 'SURFACE_NSURFACE',
-                }.get(cut.pp_cut_kind, 'MESH_PLANE')
+                kind_icon = ('SURFACE_NSURFACE'
+                             if cut.pp_cut_kind == 'SURFACE'
+                             else 'MESH_PLANE')
                 row.operator("partpin.cut_select", text=cut.name,
                              icon=kind_icon,
                              depress=(cut == active)).cut_name = cut.name
@@ -103,7 +91,6 @@ class PARTPIN_PT_shape(PARTPIN_PT_base, bpy.types.Panel):
         col.scale_y = 1.4
         col.operator("partpin.edit_cut_surface", icon='MOD_MESHDEFORM')
         layout.prop(s, "handle_points")
-        layout.prop(s, "line_lift")
 
         if cut is not None and cut.pp_cut_kind == 'SURFACE':
             loops = len({p.loop for p in cut.pp_points})
@@ -113,15 +100,11 @@ class PARTPIN_PT_shape(PARTPIN_PT_base, bpy.types.Panel):
                       icon='SURFACE_NSURFACE')
             box.prop(cut, "pp_local")
             if not cut.pp_local:
-                box.label(text="Cuts through the whole model — reliable",
-                          icon='CHECKMARK')
+                box.label(text="Cuts straight through on the line's own "
+                               "plane", icon='CHECKMARK')
             else:
                 box.label(text="Untick if the cut will not separate",
                           icon='INFO')
-            if cut.pp_local:
-                box.label(text="Marks show what would stop the cut",
-                          icon='INFO')
-            if cut.pp_local:
                 box.operator("partpin.check_cut_line", text="Try This Cut",
                              icon='ZOOM_ALL')
             row = box.row(align=True)
@@ -180,6 +163,18 @@ class PARTPIN_PT_finalize(PARTPIN_PT_base, bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         s = core.get_settings(context)
+
+        running = ops.RUNNING
+        if running is not None:
+            fraction, doing = running
+            box = layout.box()
+            box.label(text=f"Cutting — {int(fraction * 100)}%",
+                      icon='MOD_BOOLEAN')
+            box.label(text=ops.progress_bar(fraction, 18))
+            box.label(text=doing)
+            box.label(text="Esc stops it and puts everything back",
+                      icon='INFO')
+            return
 
         col = layout.column(align=True)
         col.prop(s, "keep_original")

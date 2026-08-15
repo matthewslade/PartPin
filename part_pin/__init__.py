@@ -1,6 +1,6 @@
 """PartPin — split models into printable parts with pin connectors.
 
-Cuts a closed mesh into parts with straight or drawn curved cuts, adds
+Cuts a closed mesh into parts along a line drawn on the model, adds
 pin/socket connectors with printable clearance, and exports the parts
 for 3D printing.
 """
@@ -8,7 +8,7 @@ for 3D printing.
 bl_info = {
     "name": "PartPin",
     "author": "PartPin contributors",
-    "version": (1, 22, 0),
+    "version": (1, 23, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport ▸ Sidebar (N) ▸ PartPin",
     "description": ("Split models into printable parts with matching "

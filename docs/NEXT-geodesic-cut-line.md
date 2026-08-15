@@ -6,9 +6,10 @@ consecutive anchors **walked across the surface**. Everything the old
 representation could not hold — the contour, the hairpins, the 45° limit, the
 knobs — went with it.
 
-Written by the agent who did the rework, for whoever comes next. §5 is the
-measurements, §6 is what is still open, §7 is what has already been tried and
-rejected — **read §7 before writing code**, several of those were measured
+Written by the agent who did the rework, for whoever comes next. §5 and §5a
+are the measurements — **§5a is on the user's own model**, and is the section
+to read first — §6 is what is still open, §7 is what has already been tried
+and rejected. **Read §7 before writing code**: several of those were measured
 wrong twice.
 
 ---
@@ -134,7 +135,7 @@ the sockets"). It was not the pin's boolean.
 
 ## 5. Measured
 
-The suite: **362 checks, all passing, three runs identical**, 13 seconds.
+The suite: **367 checks, all passing, three runs identical**, 25 seconds.
 
 ```sh
 /Applications/Blender.app/Contents/MacOS/Blender --background \
@@ -161,6 +162,63 @@ Against a sphere, where the answer is known exactly, the walked span is within
 **0.5% of the great circle** at 22.5°, 45° and 90° of arc, and its greatest
 distance from the chord equals the sagitta to four figures.
 
+## 5a. Measured on the user's own file
+
+`rat_ogre_fixed`, 441,616 faces, 156.36 across, closed and manifold, with a
+24-anchor line drawn on it in 1.22.0:
+
+| | before the rework | on their file now |
+| --- | --- | --- |
+| line off the model's surface | up to 0.894% of it | **1.1e-5 = 0.000007%** |
+| hairpins on the line | 373 and 3,648 | **0** |
+| spans that could not be walked | — | **0** |
+| the cut | crashed Blender | **3.2 s, two closed manifold parts** |
+| volume | — | conserved exactly |
+
+The crash (1.22.0, Windows, access violation inside Blender's allocator) came
+at the end of a long chain, and every link of it is worth knowing:
+
+1. The rim the cap has to fill is as dense as the model — 936 points, one per
+   face along the seam, where a coarse model gives thirty.
+2. `_band_tiles` held each step inwards to covering the area between two rings
+   to within a millionth. A thousand-point rim wobbles against its own plane
+   by rather more than that, so **every** step inwards was thrown away.
+3. With no steps, the cap fell back to ear-clipping the whole 936-point rim.
+   That is O(n³) in the worst case: **31 seconds**, and it landed on a handful
+   of the model's own spur triangles, leaving 28 edges of the seam unclosed.
+4. Unclosed edges mean the parts came out worse than the model arrived, so the
+   band was rejected — and the ladder went round another nineteen times, each
+   one running `mesh.intersect` over 441,616 faces.
+5. Twenty of those in one session is what Blender fell over on.
+
+Fixing (2) — a per-cent tolerance rather than a millionth — fixed all of it:
+the cap steps inwards properly, plans in 0.01 s, closes the seam completely,
+and the first band is accepted. `SEAM_SLACK`, which was written to accept the
+28 unclosed edges, was taken back out: it is not needed, and "no worse than it
+arrived" is the better rule.
+
+Four other things were made to scale with the model on the way:
+
+- `_work_object` sets the selection with array operations rather than walking
+  441,616 polygons three times: **3.2 s to 0.46 s** per band.
+- `core.mesh_issues` counts faces per edge in bulk: 2.5× quicker, and it is
+  asked of the model and both halves on every band.
+- `_regions` counts the faces in each piece instead of collecting them.
+- `_cap_plan`'s rings inside the rim are capped at 96 points. The middle of a
+  cap has no use for the rim's density, and a ring carrying every wobble of it
+  crosses itself the moment it is drawn in.
+
+Two more that came out of the same session:
+
+- `_weld_rim` takes the distance it welds at rather than working it out from
+  what is in front of it. Measured against each piece's own size, the body and
+  the hand welded to 936 points and 989, the rims stopped matching, and
+  neither half got capped at all.
+- `_aligned` matches the two rims against the *average* gap between rim
+  points, not the smallest. A rim carries the odd pair almost on top of each
+  other, and the smallest gap is a finer tolerance than the two halves agree
+  to.
+
 ## 6. What is still open
 
 - **The editor's preview is now the cutter's own cap plan**
@@ -171,6 +229,16 @@ distance from the chord equals the sagitta to four figures.
   object mode.** Assignments through `bmesh.from_edit_mesh` do not reach it.
 - **Anything walking bmesh elements must walk in coordinate order.** bmesh
   hashes by address; dict order varies between runs. This has bitten twice.
+- **A line drawn round a perfectly regular tube still fights the solver.**
+  Where the walked line runs *along* the model's own edges — which it does for
+  whole stretches of an extruded cylinder — the band contains those edges, the
+  solver is asked to cut a mesh along an edge it already has, and the seam
+  breaks at every doubled vertex. The band's copy of the line is moved a
+  millionth of the model to one side to get off them (`EDGE_CLEAR`), which
+  took a 441,800-face tube from 90 loose ends to 4, but 4 is not 0. A sculpt's
+  irregular triangulation does not run into this at all. Larger nudges close
+  the tube completely and break the sculpt, so this wants a better answer than
+  a nudge — moving only the stretches that lie along an edge, most likely.
 - The walker's `WINDOWS` ladder gives up after the widest search. No fixture
   reaches it, so the failure path is exercised only by the two-shells test.
 - `line_quality`'s spacing spread reads alarmingly (the raw ring has pairs a
@@ -226,11 +294,9 @@ blender --background --python tools/diagnose_cut.py -- <file.blend> [cut name]
 ```
 
 Ask the user to re-attach their saved files — they live in `.context/`, which
-is per-workspace and gitignored, so a new workspace will not have them. The
-three that matter: a cut that works, a freshly drawn cut full of hairpins, and
-a cut after a failed attempt. **The two hairpin files are the ones this rework
-has never been run against**, because they were not in this workspace: every
-number in §5 is from fixtures, not from them.
+is per-workspace and gitignored, so a new workspace will not have them. One of
+them settled everything in §5a in a single afternoon, after a day of measuring
+fixtures that all passed. **Ask early.**
 
 ## 9. Working with this user
 

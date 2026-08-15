@@ -4,9 +4,10 @@ Run with:
 
     blender --background --python-exit-code 1 --python tests/smoke_test.py
 
-Covers: straight cuts (draft + easy mode), multiple cuts, disabled cuts,
-curved cuts, built-in and custom connectors, pin/socket generation,
-manifold validation, and STL/OBJ/FBX export.
+Covers: the cut line and how it is walked across the model, cutting along
+it, straight cuts (draft + easy mode), multiple cuts, disabled cuts, built-in
+and custom connectors, pin/socket generation, manifold validation, and
+STL/OBJ/FBX export.
 """
 
 import math
@@ -17,7 +18,7 @@ import traceback
 
 import bpy  # noqa: F401 — must precede bmesh for the pip "bpy" module
 import bmesh
-from mathutils import Quaternion, Vector
+from mathutils import Vector
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
@@ -173,55 +174,6 @@ def scenario_multi_cut_disabled(core):
           f"got {len(parts)}")
     for p in parts:
         check(f"part closed: {p.name}", is_closed(core, p))
-
-
-def scenario_curved_cut(core):
-    print("Scenario: curved cut")
-    reset_scene()
-    s = bpy.context.scene.part_pin
-    model = make_sphere()
-    original_volume = volume(model)
-    s.target = model
-
-    data = bpy.data.curves.new("Cut Curve", 'CURVE')
-    data.dimensions = '2D'
-    data.fill_mode = 'NONE'
-    spline = data.splines.new('POLY')
-    spline.points.add(4)
-    wave = [(-2.0, 0.0), (-1.0, 0.3), (0.0, -0.3), (1.0, 0.3), (2.0, 0.0)]
-    for point, (x, y) in zip(spline.points, wave):
-        point.co = (x, y, 0.0, 1.0)
-    cut = bpy.data.objects.new("Cut Curve", data)
-    link(cut)
-    # Stroke plane = world XZ, prism extrudes along world Y through the model.
-    cut.rotation_mode = 'QUATERNION'
-    cut.rotation_quaternion = Quaternion((1.0, 0.0, 0.0), 1.5707963)
-    cut.pp_role = core.ROLE_CUT
-    cut.pp_cut_kind = 'CURVE'
-    cut.pp_enabled = True
-    bpy.context.view_layer.update()
-
-    cutter = core.make_curve_cutter(cut, model, bpy.context.scene)
-    check("curve cutter built", cutter is not None)
-    if cutter is not None:
-        check("curve cutter closed", is_closed(core, cutter))
-        core.remove_object(cutter)
-
-    bpy.ops.partpin.add_connectors()
-    conns = core.cut_connectors(bpy.context.scene, cut)
-    check("connectors placed on curve", len(conns) >= 1,
-          f"got {len(conns)}")
-
-    bpy.ops.partpin.create_parts()
-    parts = parts_of(s)
-    check("curved cut made two parts", len(parts) == 2, f"got {len(parts)}")
-    for p in parts:
-        check(f"part closed: {p.name}", is_closed(core, p))
-    if len(parts) == 2:
-        total = sum(volume(p) for p in parts)
-        check("curved cut volume sane",
-              0.9 * original_volume < total < original_volume + 0.01,
-              f"{total:.4f} vs {original_volume:.4f}")
 
 
 def scenario_custom_connector(core):
@@ -804,57 +756,6 @@ def scenario_surface_multi_loop(core):
     bpy.ops.partpin.create_parts()
     parts = parts_of(s)
     check("ring split in two", len(parts) == 2, f"got {len(parts)}")
-    for p in parts:
-        check(f"part closed: {p.name}", is_closed(core, p))
-
-
-def scenario_surface_from_curve(core):
-    print("Scenario: drawn curve cut → surface cut")
-    reset_scene()
-    s = bpy.context.scene.part_pin
-    model = make_sphere()
-    s.target = model
-    from part_pin import surface
-    from mathutils import Quaternion as Q
-
-    data = bpy.data.curves.new("Cut Curve", 'CURVE')
-    data.dimensions = '2D'
-    data.fill_mode = 'NONE'
-    spline = data.splines.new('POLY')
-    spline.points.add(4)
-    for point, (x, y) in zip(spline.points,
-                             [(-2.0, 0.0), (-1.0, 0.22), (0.0, -0.18),
-                              (1.0, 0.22), (2.0, 0.0)]):
-        point.co = (x, y, 0.0, 1.0)
-    cut = bpy.data.objects.new("Cut Curve", data)
-    link(cut)
-    cut.rotation_mode = 'QUATERNION'
-    cut.rotation_quaternion = Q((1.0, 0.0, 0.0), 1.5707963)
-    cut.pp_role = core.ROLE_CUT
-    cut.pp_cut_kind = 'CURVE'
-    cut.pp_enabled = True
-    bpy.context.view_layer.update()
-
-    loops = surface.curve_section_loops(model, cut)
-    check("curve section loop found", len(loops) == 1 and len(loops[0]) > 8,
-          f"{[len(l) for l in loops]}")
-
-    cut, error = surface.convert_to_surface(bpy.context, cut, model,
-                                            per_loop=20)
-    check("curve → surface conversion succeeded", cut is not None, str(error))
-    if cut is None:
-        return
-    check("converted cut is a mesh surface cut",
-          cut.type == 'MESH' and cut.pp_cut_kind == 'SURFACE')
-    on_surface = max(surface_distance(model, model.matrix_world @ Vector(p.co))
-                     for p in cut.pp_points)
-    check("converted points lie on the model surface", on_surface < 5e-3,
-          f"max {on_surface:.2e}")
-
-    bpy.ops.partpin.create_parts()
-    parts = parts_of(s)
-    check("converted curve cut still splits the model", len(parts) == 2,
-          f"got {len(parts)}")
     for p in parts:
         check(f"part closed: {p.name}", is_closed(core, p))
 
@@ -2858,6 +2759,183 @@ def scenario_modal_helpers(core):
           f"got {len(cut.pp_points)}")
 
 
+def make_dense_sphere(segments=900, rings=250, radius=78.0):
+    """A closed sculpt-sized model: a sphere with its vertices nudged about.
+
+    The nudging matters. A perfectly regular sphere has every one of its edges
+    running along a line of latitude or longitude, and a cut drawn round it
+    lands exactly on them — which is a real case, but not the one a sculpt
+    gives, and testing only that would leave the ordinary case untested.
+    """
+    import numpy as np
+    lat = (np.arange(1, rings) / rings) * np.pi
+    lon = np.arange(segments) * (2.0 * np.pi / segments)
+    LAT, LON = np.meshgrid(lat, lon, indexing='ij')
+    # A wobble worked out from the angles themselves, so it is the same every
+    # run without asking for a random number.
+    wobble = 1.0 + 0.004 * np.sin(LAT * 37.0) * np.cos(LON * 23.0)
+    body = np.stack([radius * wobble * np.sin(LAT) * np.cos(LON),
+                     radius * wobble * np.sin(LAT) * np.sin(LON),
+                     radius * wobble * np.cos(LAT)], axis=-1).reshape(-1, 3)
+    co = np.concatenate([body, [[0.0, 0.0, radius], [0.0, 0.0, -radius]]])
+    top, bottom = len(co) - 2, len(co) - 1
+
+    grid = np.arange((rings - 1) * segments).reshape(rings - 1, segments)
+    quads = np.stack([grid[:-1], np.roll(grid[:-1], -1, axis=1),
+                      np.roll(grid[1:], -1, axis=1), grid[1:]],
+                     axis=-1).reshape(-1, 4)
+    caps = [(top, int(grid[0][(i + 1) % segments]), int(grid[0][i]))
+            for i in range(segments)]
+    caps += [(bottom, int(grid[-1][i]), int(grid[-1][(i + 1) % segments]))
+             for i in range(segments)]
+
+    mesh = bpy.data.meshes.new("DenseSphere")
+    mesh.vertices.add(len(co))
+    mesh.vertices.foreach_set("co", co.ravel())
+    corners = list(quads.ravel()) + [i for face in caps for i in face]
+    starts, at = [], 0
+    for total in [4] * len(quads) + [3] * len(caps):
+        starts.append(at)
+        at += total
+    mesh.loops.add(len(corners))
+    mesh.polygons.add(len(quads) + len(caps))
+    mesh.loops.foreach_set("vertex_index", corners)
+    mesh.polygons.foreach_set("loop_start", starts)
+    mesh.update()
+    return mesh
+
+
+def scenario_a_dense_model_cuts(core):
+    """A cut on a model as dense as a real sculpt.
+
+    Everything about the cut scales with the model's own faces: the line is
+    walked across them, so its ring carries a point per face it crosses, and
+    the rim the cap has to fill carries one per face along the seam. Held to
+    the same measures as a coarse rim, that cap was rejected step by step
+    until it gave up and filled the whole thing flat — half a minute of
+    ear-clipping a thousand-point polygon, a part with holes in it, and then
+    nineteen more bands tried against a cut that had already worked.
+    """
+    print("Scenario: a cut on a model as dense as a sculpt")
+    reset_scene()
+    import time
+    from part_pin import mesh_cut, surface, walker
+    s = bpy.context.scene.part_pin
+
+    model = link(bpy.data.objects.new("Sculpt", make_dense_sphere()))
+    s.target = model
+    bpy.context.view_layer.update()
+    check("the fixture is as dense as a sculpt",
+          len(model.data.polygons) > 200000 and is_closed(core, model),
+          f"{len(model.data.polygons)} faces, {core.mesh_issues(model)}")
+    before = volume(model)
+
+    walker.forget()
+    cut, error = surface.cut_from_stroke(
+        bpy.context, model,
+        collar_stroke(surface, model, Vector((0.0, 0.0, 30.0)),
+                      Vector((0.0, 0.0, 1.0)), count=180, reach=120.0),
+        per_loop=24)
+    check("a collar is drawn round it", cut is not None, str(error))
+    if cut is None:
+        return
+    rings, _normals = mesh_cut.line_rings(cut, model)
+    check("its ring is as dense as the model", len(rings[0]) > 400,
+          f"{len(rings[0])} samples")
+
+    started = time.time()
+    failures = []
+    parts, _applied, warns = core.create_parts(
+        bpy.context, model, [cut], keep_original=True, failures=failures)
+    elapsed = time.time() - started
+    check("it cuts", len(parts) == 2, f"got {len(parts)}: {failures}")
+    if len(parts) != 2:
+        return
+    for p in parts:
+        check(f"part closed: {p.name}", is_closed(core, p),
+              str(core.mesh_issues(p)))
+    check("nothing is warned about", not warns, str(warns))
+    check("the model is all still there",
+          abs(sum(volume(p) for p in parts) - before) < before * 1e-6,
+          f"{sum(volume(p) for p in parts):.3f} vs {before:.3f}")
+    # The first band should do it. Grinding through the ladder on a model
+    # this size is a minute of work and, on one machine, a crash.
+    check("and it does not grind through the ladder to get there",
+          elapsed < 30.0, f"took {elapsed:.1f}s")
+    print(f"  (the whole cut took {elapsed:.1f}s)")
+
+    # The cap has to step inwards on a rim this dense, not give up and fill
+    # it flat: filling flat is the slow, hole-leaving path.
+    rim = surface.resample_loop(rings[0], min(len(rings[0]), 900),
+                               cyclic=True)
+    started = time.time()
+    extra, tris = mesh_cut._cap_plan(rim, mesh_cut.cap_normal(rim))
+    check("the cap steps inwards over a dense rim", tris and len(extra) > 20,
+          f"{len(extra)} points inside a {len(rim)}-point rim")
+    check("and planning it is quick", time.time() - started < 2.0,
+          f"{time.time() - started:.1f}s")
+    walker.forget()
+
+
+def scenario_a_cut_says_how_far_along_it_is(core):
+    """A cut takes seconds per attempt and there can be twenty of them, so it
+    is handed out a step at a time: something to show, and something to stop."""
+    print("Scenario: a cut can be watched, and stopped")
+    reset_scene()
+    from part_pin import ops, surface
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    before = volume(model)
+    cut = collar_cut(core, surface, model)
+
+    seen = []
+    steps = core.create_parts_steps(bpy.context, model, [cut],
+                                    keep_original=True)
+    while True:
+        try:
+            seen.append(next(steps))
+        except StopIteration as done:
+            parts, _applied, _warnings = done.value
+            break
+    check("it reports its way through the cut", len(seen) >= 2,
+          f"{len(seen)} steps")
+    check("every step says how far along it is",
+          all(0.0 <= fraction <= 1.0 and doing for fraction, doing in seen),
+          str(seen[:3]))
+    check("and the steps run forwards",
+          all(b[0] >= a[0] for a, b in zip(seen, seen[1:])),
+          str([round(f, 2) for f, _d in seen]))
+    check("the cut still comes out in two", len(parts) == 2,
+          f"got {len(parts)}")
+    check("a bar is drawn for it",
+          ops.progress_bar(0.0).startswith("░")
+          and ops.progress_bar(1.0).startswith("█")
+          and len(ops.progress_bar(0.5)) == len(ops.progress_bar(1.0)))
+
+    # Stopping it part way has to leave the scene exactly as it was found.
+    reset_scene()
+    s = bpy.context.scene.part_pin
+    model = make_limb(core)
+    s.target = model
+    cut = collar_cut(core, surface, model)
+    collections = {c.name for c in bpy.data.collections}
+    objects = {o.name for o in bpy.context.scene.objects}
+    steps = core.create_parts_steps(bpy.context, model, [cut],
+                                    keep_original=True)
+    next(steps)
+    next(steps)
+    steps.close()
+    check("stopping puts back everything it had made",
+          {c.name for c in bpy.data.collections} == collections
+          and {o.name for o in bpy.context.scene.objects} == objects,
+          str(sorted({o.name for o in bpy.context.scene.objects} - objects)))
+    check("the model is still there, still visible",
+          model.name in bpy.context.scene.objects and not model.hide_get()
+          and abs(volume(model) - before) < 1e-9)
+    check("and so is the cut", cut.name in bpy.context.scene.objects)
+
+
 def scenario_operators_registered(core):
     print("Scenario: new operators registered")
     reset_scene()
@@ -2877,7 +2955,6 @@ def main():
 
     scenario_plane_cut(core)
     scenario_multi_cut_disabled(core)
-    scenario_curved_cut(core)
     scenario_custom_connector(core)
     scenario_flip_pin(core)
     scenario_validation(core)
@@ -2889,7 +2966,6 @@ def main():
     scenario_surface_drag(core)
     scenario_surface_connectors(core)
     scenario_surface_multi_loop(core)
-    scenario_surface_from_curve(core)
     scenario_local_leaves_rest_whole(core)
     scenario_local_vs_full(core)
     scenario_local_wide_piece(core)
@@ -2926,6 +3002,8 @@ def main():
     scenario_settings_are_all_used(core)
     scenario_operator_wiring_audit(core)
     scenario_modal_helpers(core)
+    scenario_a_dense_model_cuts(core)
+    scenario_a_cut_says_how_far_along_it_is(core)
     scenario_operators_registered(core)
     scenario_export(core)  # runs easy mode internally, then exports
 

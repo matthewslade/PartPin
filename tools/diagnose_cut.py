@@ -163,7 +163,7 @@ def try_every_band(target, cut, rings, normals):
                 continue
 
             bm, layer, seam = found
-            regions = [len(g) for g in mesh_cut._regions(bm, layer, seam)]
+            regions = mesh_cut._regions(bm, layer, seam)
             print(f"  {what}: seam closed ({len(seam)} edges), "
                   f"regions {sorted(regions, reverse=True)[:4]}")
             try:

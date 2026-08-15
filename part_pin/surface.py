@@ -123,40 +123,6 @@ def plane_section_loops(target, matrix_world):
     return loops
 
 
-def curve_section_loops(target, cut, samples=48):
-    """Where a drawn (extruded) cut meets the model surface.
-
-    Rays are fired along the extrusion direction at points across the
-    stroke; the front hits and the reversed back hits form one loop.
-    """
-    pts, _cyclic = core.sample_cut_curve(cut, resolution=24)
-    if len(pts) < 2:
-        return []
-    m = cut.matrix_world
-    stroke = resample_loop([Vector((p.x, p.y, 0.0)) for p in pts],
-                           samples, cyclic=False)
-    extrude = (m.to_quaternion() @ Vector((0.0, 0.0, 1.0))).normalized()
-    far = core.bbox_diagonal(target) * 2.0
-
-    obj = evaluated(target)
-    inv = obj.matrix_world.inverted()
-    inv3 = inv.to_3x3()
-    front, back = [], []
-    for p in stroke:
-        world = m @ p
-        for direction, bucket in ((extrude, front), (-extrude, back)):
-            origin = world - direction * far
-            hit, loc, _n, _i = obj.ray_cast(inv @ origin, inv3 @ direction)
-            if hit:
-                bucket.append(obj.matrix_world @ loc)
-    loop = front + list(reversed(back))
-    return [loop] if len(loop) >= 4 else []
-
-
-# ----------------------------------------------------------------------
-# Polyline and polygon maths
-# ----------------------------------------------------------------------
-
 def resample_loop(points, count, cyclic=True):
     """Resample a polyline to `count` evenly arc-length-spaced points."""
     if len(points) < 2 or count < 2:
@@ -851,20 +817,16 @@ def _anchors_on_surface(target, loops, per_loop):
 
 
 def convert_to_surface(context, cut, target, per_loop=16):
-    """Turn a plane or drawn cut into an editable surface cut.
+    """Turn a straight cut into an editable cut line on the model.
 
-    Returns (cut_object, error_message). The object may be a *new* one
-    when the original was a curve, since a curve object cannot become a
-    mesh in place; connectors are re-parented in that case.
+    Returns (cut_object, error_message). A cut that is already a line on the
+    surface is handed straight back.
     """
-    scene = context.scene
     if cut.pp_cut_kind == 'SURFACE':
         if len(cut.pp_points) >= 3:
             migrate(cut, target)
             return cut, None
         loops = plane_section_loops(target, cut.matrix_world)
-    elif cut.pp_cut_kind == 'CURVE':
-        loops = curve_section_loops(target, cut)
     else:
         loops = plane_section_loops(target, cut.matrix_world)
 
@@ -879,27 +841,6 @@ def convert_to_surface(context, cut, target, per_loop=16):
         points.extend(anchors)
         faces.extend(on_faces)
         loop_ids.extend([index] * len(anchors))
-
-    if cut.pp_cut_kind == 'CURVE':
-        # A curve object cannot become a mesh in place, so the cut is
-        # rebuilt as a mesh object and its connectors move across without
-        # shifting in world space.
-        matrix = cut.matrix_world.copy()
-        new_cut = bpy.data.objects.new(
-            cut.name, bpy.data.meshes.new("PartPin_CutSurface"))
-        for coll in cut.users_collection:
-            coll.objects.link(new_cut)
-        new_cut.pp_role = core.ROLE_CUT
-        new_cut.pp_enabled = cut.pp_enabled
-        new_cut.pp_index = cut.pp_index
-        new_cut.matrix_world = matrix
-        for conn in core.cut_connectors(scene, cut):
-            world = conn.matrix_world.copy()
-            conn.parent = new_cut
-            conn.matrix_parent_inverse = matrix.inverted()
-            conn.matrix_world = world
-        core.remove_object(cut)
-        cut = new_cut
 
     cut.pp_cut_kind = 'SURFACE'
     store_anchors(cut, points, loop_ids, faces)
