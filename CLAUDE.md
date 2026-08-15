@@ -87,13 +87,21 @@ That is not the same as capping the band by the line's turning radius, which
 bridge a crease elsewhere. Where the line runs straight the cap is thousands of
 times any height ever asked for.
 
-## Two bugs that will bite again if this is rewritten carelessly
+## Three bugs that will bite again if this is rewritten carelessly
 
 - `bpy.ops.mesh.intersect` only sees a selection set **on the mesh, in object
   mode**. Assignments through `bmesh.from_edit_mesh` do not reach it.
 - Anything walking bmesh elements must walk in **coordinate order**. bmesh
   hashes by address, so dict order varies between runs and the same cut then
   works one run and not the next. This has bitten twice, in two places.
+- **This installs as an extension, and an extension has no `bl_info`.** Blender
+  4.2+ loads it as `bl_ext.user_default.part_pin` and takes `bl_info` away; the
+  manifest is the only metadata there is at runtime. The suite imports
+  `part_pin` as a plain package, which *keeps* `bl_info` — so anything reading
+  packaging metadata passes the tests and throws in the product. It did: the
+  version footer raised `ImportError` on every redraw of the panel. Test that
+  path with `bl_info` deleted from the package module, the way
+  `scenario_the_version_is_shown_and_agrees` does.
 
 ## Everything scales with the model
 

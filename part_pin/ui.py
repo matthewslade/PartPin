@@ -1,5 +1,9 @@
 """Sidebar panels for PartPin (3D Viewport ▸ N-panel ▸ PartPin)."""
 
+import os
+import re
+import sys
+
 import bpy
 
 from . import core, ops
@@ -12,9 +16,38 @@ class PARTPIN_PT_base:
 
 
 def version():
-    """The add-on's version, as it is written on the release."""
-    from . import bl_info
-    return ".".join(str(part) for part in bl_info["version"])
+    """The add-on's version, as it is written on the release.
+
+    Read from the manifest, which is the one file Blender itself installs
+    from. `bl_info` is not there to read: installed as an extension — which
+    is how Blender 4.2 and later install this — the package is loaded as
+    `bl_ext.user_default.part_pin` and Blender takes `bl_info` away, so
+    reaching for it threw on every redraw of the panel. It is still the
+    answer for a legacy add-on install, so it is the fallback.
+    """
+    global _VERSION
+    if _VERSION is not None:
+        return _VERSION
+    found = None
+    manifest = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "blender_manifest.toml")
+    try:
+        with open(manifest, encoding="utf-8") as handle:
+            written = re.search(r'^version\s*=\s*"([^"]+)"', handle.read(),
+                                re.MULTILINE)
+        found = written.group(1) if written else None
+    except OSError:
+        found = None
+    if found is None:
+        legacy = getattr(sys.modules.get(__package__), "bl_info", None)
+        if legacy:
+            found = ".".join(str(part) for part in legacy.get("version", ()))
+    _VERSION = found or "?"
+    return _VERSION
+
+
+# Worked out once: the manifest cannot change under a running Blender.
+_VERSION = None
 
 
 class PARTPIN_PT_main(PARTPIN_PT_base, bpy.types.Panel):

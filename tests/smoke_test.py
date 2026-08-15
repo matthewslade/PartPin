@@ -3068,6 +3068,7 @@ def scenario_the_version_is_shown_and_agrees(core):
     import re
     from part_pin import ui
 
+    ui._VERSION = None
     shown = ui.version()
     check("the panel has a version to show", re.fullmatch(r"\d+\.\d+\.\d+",
                                                           shown), shown)
@@ -3077,6 +3078,26 @@ def scenario_the_version_is_shown_and_agrees(core):
                             re.MULTILINE).group(1)
     check("and it is the version Blender installs", shown == written,
           f"panel says {shown}, manifest says {written}")
+
+    # Installed as an extension — which is how Blender 4.2 and later install
+    # this — the package is loaded as `bl_ext.user_default.part_pin` and
+    # Blender takes `bl_info` away. Reaching for it threw on every redraw of
+    # the panel, and the suite missed it because a plain import keeps it.
+    import part_pin
+    kept = part_pin.bl_info
+    ui._VERSION = None
+    del part_pin.bl_info
+    try:
+        without = ui.version()
+    finally:
+        part_pin.bl_info = kept
+        ui._VERSION = None
+    check("and it is still there with bl_info taken away, as an extension "
+          "install takes it", without == written,
+          f"got {without!r}, expected {written!r}")
+    check("bl_info agrees with the manifest, for a legacy install",
+          ".".join(str(p) for p in kept["version"]) == written,
+          f"bl_info says {kept['version']}, manifest says {written}")
     check("it is drawn at the bottom, under everything else",
           ui.CLASSES[-1] is ui.PARTPIN_PT_version
           and ui.PARTPIN_PT_version.bl_parent_id == "PARTPIN_PT_main",
